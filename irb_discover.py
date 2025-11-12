@@ -97,6 +97,16 @@ SUMMARY_ITEMS = [
 ]
 
 
+def _stringify_value(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple)):
+        return "; ".join(_stringify_value(v) for v in val if v is not None)
+    if isinstance(val, dict):
+        return "; ".join(f"{k}: {_stringify_value(v)}" for k, v in val.items())
+    return str(val)
+
+
 def log_event(message: str):
     print(f"[IRB] {message}", flush=True)
 
@@ -565,7 +575,7 @@ def summarize_field(item: Dict[str, str], hits: List[Dict[str, Any]], model: str
     return {
         "id": item["id"],
         "label": item["label"],
-        "value": parsed.get("value") or "Not specified",
+        "value": _stringify_value(parsed.get("value")) or "Not specified",
         "status": (parsed.get("status") or "NOT_FOUND").upper(),
         "pages": parsed.get("pages") or [],
         "evidence": parsed.get("evidence") or [],
@@ -636,6 +646,8 @@ if "chunks" not in st.session_state:
 if "summary" not in st.session_state:
     st.session_state.summary = None
     st.session_state.summary_meta = {}
+if "summary_modal" not in st.session_state:
+    st.session_state.summary_modal = None
 
 if uploaded and OPENAI_OK:
     raw_bytes = uploaded.read()
@@ -740,21 +752,51 @@ if st.session_state.chunks:
                 }
 
     if st.session_state.get("summary_pref") and st.session_state.summary:
-        with st.expander("IRB/Study Administrative Data Summary", expanded=True):
-            for idx, item in enumerate(st.session_state.summary, start=1):
-                exp = st.expander(f"{idx}. {item['label']}", expanded=False)
-                with exp:
-                    st.markdown(f"**Value:** {item['value']}")
-                    pages = item.get("pages") or []
-                    page_str = ", ".join(f"p. {p}" for p in pages) if pages else "N/A"
-                    st.caption(f"Status: {item['status']} • References: {page_str}")
-                    evidence = item.get("evidence") or []
-                    if evidence:
-                        st.markdown("**Evidence**")
-                        for ev in evidence:
-                            st.write(f"• {ev}")
-                    else:
-                        st.write("No supporting quotes captured.")
+        display_items = []
+        for item in st.session_state.summary:
+            status = (item.get("status") or "").upper()
+            value_str = _stringify_value(item.get("value")).strip().lower()
+            if status != "NOT_FOUND" and value_str != "not specified" and value_str != "":
+                display_items.append(item)
+        if display_items:
+            with st.expander("IRB/Study Administrative Data Summary", expanded=True):
+                for idx, item in enumerate(display_items, start=1):
+                    exp = st.expander(f"{idx}. {item['label']}", expanded=False)
+                    with exp:
+                        cols = st.columns([10, 1])
+                        with cols[0]:
+                            st.markdown(f"**Value:** {item['value']}")
+                            pages = item.get("pages") or []
+                            page_str = ", ".join(f"p. {p}" for p in pages) if pages else "N/A"
+                            st.caption(f"Status: {item['status']} • References: {page_str}")
+                        with cols[1]:
+                            if st.button(
+                                "👁️",
+                                key=f"refs_btn_{meta.get('file_hash')}_{item['id']}",
+                                help="View references and supporting evidence",
+                            ):
+                                st.session_state.summary_modal = item
+                                st.rerun()
+        else:
+            st.info("No structured metadata fields were confidently extracted from this document.")
+
+    modal_item = st.session_state.get("summary_modal")
+    if modal_item:
+        ref_pages = modal_item.get("pages") or []
+        ref_text = ", ".join(f"p. {p}" for p in ref_pages) if ref_pages else "N/A"
+        evidence = modal_item.get("evidence") or []
+        st.markdown("---")
+        st.markdown(f"### References – {modal_item['label']}")
+        st.markdown(f"**References:** {ref_text}")
+        st.markdown("**Evidence**")
+        if evidence:
+            for ev in evidence:
+                st.write(f"• {ev}")
+        else:
+            st.write("No supporting quotes captured.")
+        if st.button("Close references panel", key="close_summary_modal"):
+            st.session_state.summary_modal = None
+            st.rerun()
 
     st.markdown("#### Ask the agent")
     default_q = "List every Yes/No prompt and whether it was marked."
