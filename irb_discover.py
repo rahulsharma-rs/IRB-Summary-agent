@@ -7,8 +7,11 @@ import re
 import json
 import time
 import base64
+import hashlib
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
+
+from pathlib import Path
 
 import numpy as np
 import streamlit as st
@@ -37,6 +40,14 @@ client = OpenAI() if OPENAI_OK else None
 AGENT_MODEL_CHOICES = ["gpt-4o-mini", "gpt-5-nano"]
 DEFAULT_AGENT_MODEL = os.getenv("OPENAI_MODEL") or AGENT_MODEL_CHOICES[0]
 DEFAULT_EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
+CACHE_DIR = Path(".rag_cache")
+CACHE_VERSION = 1
+CHUNKER_VERSION = 1
+
+
+def log_event(message: str):
+    print(f"[IRB] {message}", flush=True)
 
 # -----------------------------------------------------------------------------
 # Regex helpers
@@ -209,16 +220,15 @@ def _read_txt_bytes(upload: bytes) -> List[Tuple[int, str]]:
     return [(1, txt)]
 
 
-def load_pages(uploaded_file, use_vision: bool, vision_model: str) -> Tuple[List[Tuple[int, str]], bytes]:
-    name = uploaded_file.name.lower()
-    data = uploaded_file.read()
-    if name.endswith(".pdf"):
+def load_pages(name: str, data: bytes, use_vision: bool, vision_model: str) -> List[Tuple[int, str]]:
+    lname = name.lower()
+    if lname.endswith(".pdf"):
         pages = _read_pdf_bytes(data, use_vision=use_vision, vision_model=vision_model)
-    elif name.endswith((".docx", ".doc")):
+    elif lname.endswith((".docx", ".doc")):
         pages = _read_docx_bytes(data)
     else:
         pages = _read_txt_bytes(data)
-    return pages, data
+    return pages
 
 
 def augment_pdf_with_forms(pdf_bytes: bytes, pages: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
@@ -267,6 +277,110 @@ def split_chunks(pages: List[Tuple[int, str]], max_chars=1500, overlap=200) -> L
                     break
                 i = max(0, end - overlap)
     return chunks
+
+
+def compute_file_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def chunks_checksum(chunks: List[DocChunk]) -> str:
+    h = hashlib.sha256()
+    for chunk in chunks:
+        h.update(str(chunk.page).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(chunk.text.encode("utf-8", errors="ignore"))
+        h.update(b"\x01")
+    return h.hexdigest()
+
+
+def _model_slug(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", name)
+
+
+def _cache_bucket(file_hash: str, embed_model: str, vision_flag: bool) -> Path:
+    model_slug = _model_slug(embed_model)
+    return CACHE_DIR / file_hash[:16] / f"{model_slug}_{int(bool(vision_flag))}"
+
+
+def _chunks_to_json(chunks: List[DocChunk]) -> List[Dict[str, Any]]:
+    return [{"page": c.page, "text": c.text} for c in chunks]
+
+
+def _chunks_from_json(payload: List[Dict[str, Any]]) -> List[DocChunk]:
+    return [DocChunk(page=int(item["page"]), text=item["text"]) for item in payload]
+
+
+def load_cached_index(file_hash: str, embed_model: str, vision_flag: bool):
+    bucket = _cache_bucket(file_hash, embed_model, vision_flag)
+    meta_path = bucket / "meta.json"
+    chunks_path = bucket / "chunks.json"
+    emb_path = bucket / "embeddings.npy"
+    if not (meta_path.exists() and chunks_path.exists() and emb_path.exists()):
+        log_event(f"[cache] miss – files not found for {bucket}")
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        log_event(f"[cache] miss – could not read meta for {bucket}")
+        return None
+    if meta.get("cache_version") != CACHE_VERSION:
+        log_event(f"[cache] miss – cache version mismatch ({meta.get('cache_version')} != {CACHE_VERSION})")
+        return None
+    if meta.get("chunker_version") != CHUNKER_VERSION:
+        log_event(f"[cache] miss – chunker version mismatch ({meta.get('chunker_version')} != {CHUNKER_VERSION})")
+        return None
+    if meta.get("file_hash") != file_hash:
+        log_event("[cache] miss – file hash mismatch")
+        return None
+    if meta.get("embed_model") != embed_model:
+        log_event("[cache] miss – embedding model mismatch")
+        return None
+    if bool(meta.get("vision_enabled")) != bool(vision_flag):
+        log_event("[cache] miss – vision flag mismatch")
+        return None
+    try:
+        embeddings = np.load(emb_path)
+        chunk_data = json.loads(chunks_path.read_text(encoding="utf-8"))
+        chunks = _chunks_from_json(chunk_data)
+    except Exception:
+        log_event(f"[cache] miss – failed to load embeddings/chunks for {bucket}")
+        return None
+    if meta.get("chunk_checksum") and meta["chunk_checksum"] != chunks_checksum(chunks):
+        log_event("[cache] miss – checksum mismatch")
+        return None
+    log_event(f"[cache] hit for bucket {bucket}")
+    return {"chunks": chunks, "embeddings": embeddings, "meta": meta}
+
+
+def save_cached_index(
+    file_hash: str,
+    embed_model: str,
+    vision_flag: bool,
+    chunks: List[DocChunk],
+    embeddings: np.ndarray,
+    meta: Dict[str, Any],
+):
+    bucket = _cache_bucket(file_hash, embed_model, vision_flag)
+    bucket.mkdir(parents=True, exist_ok=True)
+    np.save(bucket / "embeddings.npy", embeddings)
+    (bucket / "chunks.json").write_text(
+        json.dumps(_chunks_to_json(chunks), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    meta_out = dict(meta)
+    meta_out.update(
+        {
+            "file_hash": file_hash,
+            "embed_model": embed_model,
+            "vision_enabled": bool(vision_flag),
+            "chunk_checksum": chunks_checksum(chunks),
+            "cache_version": CACHE_VERSION,
+            "chunker_version": CHUNKER_VERSION,
+            "cached_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    (bucket / "meta.json").write_text(json.dumps(meta_out, indent=2), encoding="utf-8")
+    log_event(f"[cache] saved embeddings and chunks to {bucket}")
 
 
 def embed_texts(texts: List[str], model: str) -> np.ndarray:
@@ -388,34 +502,78 @@ if "chunks" not in st.session_state:
     st.session_state.meta = {}
 
 if uploaded and OPENAI_OK:
-    with st.spinner("Running agentic ingestion…"):
-        pages, raw_bytes = load_pages(uploaded, use_vision=vision_rescue, vision_model=agent_model)
-        if uploaded.name.lower().endswith(".pdf"):
-            pages = augment_pdf_with_forms(raw_bytes, pages)
-
-        chunks = split_chunks(pages)
-        if not chunks:
-            st.error("No text detected in the document.")
-        else:
-            embeddings = embed_texts([c.text for c in chunks], model=embed_model)
+    raw_bytes = uploaded.read()
+    if not raw_bytes:
+        st.error("Uploaded file is empty.")
+    else:
+        file_hash = compute_file_hash(raw_bytes)
+        log_event(
+            f"Received '{uploaded.name}' ({len(raw_bytes)/1024:.1f} KB) hash={file_hash[:12]}… embed_model={embed_model} vision={vision_rescue}"
+        )
+        log_event("Checking local cache…")
+        cache_payload = load_cached_index(file_hash, embed_model, vision_rescue)
+        if cache_payload:
+            log_event("Cache hit – skipping re-embedding.")
+            chunks = cache_payload["chunks"]
+            embeddings = cache_payload["embeddings"]
             index = SimpleIndex(embeddings)
-            st.session_state.chunks = chunks
-            st.session_state.index = index
-            st.session_state.meta = {
+            cached_meta = cache_payload["meta"]
+            meta = {
                 "filename": uploaded.name,
-                "n_pages": len(pages),
-                "n_chunks": len(chunks),
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "n_pages": cached_meta.get("n_pages", 0),
+                "n_chunks": cached_meta.get("n_chunks", len(chunks)),
+                "time": cached_meta.get("cached_at", time.strftime("%Y-%m-%d %H:%M:%S")),
                 "agent_model": agent_model,
                 "embed_model": embed_model,
                 "vision_enabled": vision_rescue,
+                "file_hash": file_hash,
+                "cache_hit": True,
             }
+        else:
+            log_event("Cache miss – parsing document and computing embeddings.")
+            with st.spinner("Running agentic ingestion…"):
+                log_event("Reading pages…")
+                pages = load_pages(uploaded.name, raw_bytes, use_vision=vision_rescue, vision_model=agent_model)
+                if uploaded.name.lower().endswith(".pdf"):
+                    log_event("Augmenting PDF with AcroForm data.")
+                    pages = augment_pdf_with_forms(raw_bytes, pages)
+
+                log_event(f"Chunking {len(pages)} pages…")
+                chunks = split_chunks(pages)
+                if not chunks:
+                    st.error("No text detected in the document.")
+                    chunks = None
+                else:
+                    log_event(f"Generated {len(chunks)} chunks. Requesting embeddings from OpenAI…")
+                    embeddings = embed_texts([c.text for c in chunks], model=embed_model)
+                    log_event("Embeddings received. Saving to cache.")
+                    index = SimpleIndex(embeddings)
+                    base_meta = {
+                        "filename": uploaded.name,
+                        "n_pages": len(pages),
+                        "n_chunks": len(chunks),
+                    }
+                    save_cached_index(file_hash, embed_model, vision_rescue, chunks, embeddings, base_meta)
+                    meta = {
+                        **base_meta,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "agent_model": agent_model,
+                        "embed_model": embed_model,
+                        "vision_enabled": vision_rescue,
+                        "file_hash": file_hash,
+                        "cache_hit": False,
+                    }
+        if chunks:
+            st.session_state.chunks = chunks
+            st.session_state.index = index
+            st.session_state.meta = meta
 
 if st.session_state.chunks:
     meta = st.session_state.meta
     note = f" • Vision rescue: {'on' if meta.get('vision_enabled') else 'off'}"
+    cache_note = f" • Cache: {'hit' if meta.get('cache_hit') else 'miss'}"
     st.caption(
-        f"**Loaded:** {meta['filename']} • Pages: {meta['n_pages']} • Chunks: {meta['n_chunks']} • Agent: {meta['agent_model']} • Embed: {meta['embed_model']}{note}"
+        f"**Loaded:** {meta['filename']} • Pages: {meta['n_pages']} • Chunks: {meta['n_chunks']} • Agent: {meta['agent_model']} • Embed: {meta['embed_model']}{note}{cache_note}"
     )
 
     st.markdown("#### Ask the agent")
