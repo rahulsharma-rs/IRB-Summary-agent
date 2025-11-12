@@ -45,6 +45,57 @@ CACHE_DIR = Path(".rag_cache")
 CACHE_VERSION = 1
 CHUNKER_VERSION = 1
 
+SUMMARY_ITEMS = [
+    {
+        "id": "irb_number_pi_title",
+        "label": "IRB number, PI, title",
+        "query": "IRB number protocol number principal investigator study title",
+        "instruction": "Report the IRB protocol number, the principal investigator(s), and the full study title.",
+    },
+    {
+        "id": "study_purpose",
+        "label": "Study purpose or description",
+        "query": "study purpose summary background description objective",
+        "instruction": "Summarize the study purpose or high-level description in 1-2 sentences.",
+    },
+    {
+        "id": "cohort_criteria",
+        "label": "Cohort criteria (inclusion/exclusion)",
+        "query": "inclusion criteria exclusion criteria eligibility subjects",
+        "instruction": "List key inclusion and exclusion criteria; mention if not explicitly stated.",
+    },
+    {
+        "id": "data_elements",
+        "label": "Approved data elements (date range, identifiers)",
+        "query": "data elements identifiers date range data requested approved data",
+        "instruction": "Describe which data elements or identifiers are approved for release, including any date ranges.",
+    },
+    {
+        "id": "funding",
+        "label": "Funding / sponsor info",
+        "query": "funding sponsor grant support",
+        "instruction": "Identify funding sources or sponsors; if none, state that it is not specified.",
+    },
+    {
+        "id": "protocol_status",
+        "label": "Protocol status (approved, expired, exempt)",
+        "query": "protocol status approval exempt withdrawn",
+        "instruction": "State the current protocol status (approved, pending, expired, exempt, etc.).",
+    },
+    {
+        "id": "expiration_date",
+        "label": "Expiration date",
+        "query": "expiration date approval expiration continuing review",
+        "instruction": "Provide the protocol approval or expiration date(s).",
+    },
+    {
+        "id": "privacy_confidentiality",
+        "label": "Privacy & confidentiality items approved",
+        "query": "privacy confidentiality HIPAA PHI data security checkboxes",
+        "instruction": "List which privacy or confidentiality items/checkboxes were approved or checked.",
+    },
+]
+
 
 def log_event(message: str):
     print(f"[IRB] {message}", flush=True)
@@ -460,6 +511,80 @@ def agentic_answer(question: str, context_blocks: List[Dict[str, Any]], model: s
 
 
 # -----------------------------------------------------------------------------
+# Structured metadata summary
+# -----------------------------------------------------------------------------
+
+SUMMARY_PROMPT = (
+    "You are an expert IRB protocol summarizer. Only use the provided context. "
+    "Return a JSON object with keys: field, value, status, pages, evidence. "
+    "status must be one of FOUND, PARTIAL, NOT_FOUND. "
+    "pages is an array of integers. evidence is an array of short quotes (<=120 chars). "
+    "If the information is missing, set value to 'Not specified' and status to NOT_FOUND."
+)
+
+
+def summarize_field(item: Dict[str, str], hits: List[Dict[str, Any]], model: str) -> Dict[str, Any]:
+    if not hits:
+        return {
+            "id": item["id"],
+            "label": item["label"],
+            "value": "Not specified",
+            "status": "NOT_FOUND",
+            "pages": [],
+            "evidence": [],
+        }
+    context = "\n\n".join([f"(Page {h['page']}) {h['text']}" for h in hits])
+    user_content = (
+        f"Field: {item['label']}\n"
+        f"Instruction: {item['instruction']}\n"
+        "Respond with JSON using the schema described earlier.\n\n"
+        f"Context:\n{context}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": SUMMARY_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", raw)
+            raw = raw.rstrip("`").strip()
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = {
+            "field": item["label"],
+            "value": "Not specified",
+            "status": "NOT_FOUND",
+            "pages": [],
+            "evidence": [],
+        }
+    return {
+        "id": item["id"],
+        "label": item["label"],
+        "value": parsed.get("value") or "Not specified",
+        "status": (parsed.get("status") or "NOT_FOUND").upper(),
+        "pages": parsed.get("pages") or [],
+        "evidence": parsed.get("evidence") or [],
+    }
+
+
+def summarize_metadata(chunks: List[DocChunk], index: SimpleIndex, embed_model: str, agent_model: str) -> List[Dict[str, Any]]:
+    if not (OPENAI_OK and client):
+        return []
+    results: List[Dict[str, Any]] = []
+    for item in SUMMARY_ITEMS:
+        hits = retrieve(index, chunks, item["query"], model=embed_model, k=4)
+        summary = summarize_field(item, hits, model=agent_model)
+        summary["hits"] = hits
+        results.append(summary)
+    return results
+
+
+# -----------------------------------------------------------------------------
 # Streamlit UI
 # -----------------------------------------------------------------------------
 
@@ -473,6 +598,14 @@ if not OPENAI_OK:
 with st.sidebar:
     st.markdown("### Upload Protocol")
     uploaded = st.file_uploader("PDF, DOCX, or TXT", type=["pdf", "docx", "doc", "txt"])
+    summarize_choice = st.radio(
+        "Summarize “IRB/Study Administrative Data”?",
+        options=["No", "Yes"],
+        horizontal=True,
+        help="Automatically extract key protocol metadata after upload.",
+    )
+    summary_requested = summarize_choice == "Yes"
+    st.session_state["summary_pref"] = summary_requested
 
     st.markdown("---")
     st.markdown("### Agent Settings")
@@ -500,6 +633,9 @@ if "chunks" not in st.session_state:
     st.session_state.chunks = None
     st.session_state.index = None
     st.session_state.meta = {}
+if "summary" not in st.session_state:
+    st.session_state.summary = None
+    st.session_state.summary_meta = {}
 
 if uploaded and OPENAI_OK:
     raw_bytes = uploaded.read()
@@ -567,6 +703,9 @@ if uploaded and OPENAI_OK:
             st.session_state.chunks = chunks
             st.session_state.index = index
             st.session_state.meta = meta
+            if st.session_state.summary_meta.get("file_hash") != meta.get("file_hash"):
+                st.session_state.summary = None
+                st.session_state.summary_meta = {}
 
 if st.session_state.chunks:
     meta = st.session_state.meta
@@ -575,6 +714,47 @@ if st.session_state.chunks:
     st.caption(
         f"**Loaded:** {meta['filename']} • Pages: {meta['n_pages']} • Chunks: {meta['n_chunks']} • Agent: {meta['agent_model']} • Embed: {meta['embed_model']}{note}{cache_note}"
     )
+
+    if st.session_state.get("summary_pref") and st.session_state.index:
+        needs_summary = (
+            st.session_state.summary is None
+            or st.session_state.summary_meta.get("file_hash") != meta.get("file_hash")
+            or st.session_state.summary_meta.get("agent_model") != meta.get("agent_model")
+            or st.session_state.summary_meta.get("embed_model") != meta.get("embed_model")
+        )
+        if needs_summary:
+            with st.spinner("Summarizing IRB/Study Administrative Data…"):
+                log_event("Running metadata summarization…")
+                summary_data = summarize_metadata(
+                    st.session_state.chunks,
+                    st.session_state.index,
+                    embed_model=meta["embed_model"],
+                    agent_model=meta["agent_model"],
+                )
+                st.session_state.summary = summary_data
+                st.session_state.summary_meta = {
+                    "file_hash": meta.get("file_hash"),
+                    "agent_model": meta.get("agent_model"),
+                    "embed_model": meta.get("embed_model"),
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+
+    if st.session_state.get("summary_pref") and st.session_state.summary:
+        with st.expander("IRB/Study Administrative Data Summary", expanded=True):
+            for idx, item in enumerate(st.session_state.summary, start=1):
+                exp = st.expander(f"{idx}. {item['label']}", expanded=False)
+                with exp:
+                    st.markdown(f"**Value:** {item['value']}")
+                    pages = item.get("pages") or []
+                    page_str = ", ".join(f"p. {p}" for p in pages) if pages else "N/A"
+                    st.caption(f"Status: {item['status']} • References: {page_str}")
+                    evidence = item.get("evidence") or []
+                    if evidence:
+                        st.markdown("**Evidence**")
+                        for ev in evidence:
+                            st.write(f"• {ev}")
+                    else:
+                        st.write("No supporting quotes captured.")
 
     st.markdown("#### Ask the agent")
     default_q = "List every Yes/No prompt and whether it was marked."
