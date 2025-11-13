@@ -752,24 +752,26 @@ if st.session_state.chunks:
                 }
 
     if st.session_state.get("summary_pref") and st.session_state.summary:
-        display_items = []
-        for item in st.session_state.summary:
-            status = (item.get("status") or "").upper()
-            value_str = _stringify_value(item.get("value")).strip().lower()
-            if status != "NOT_FOUND" and value_str != "not specified" and value_str != "":
-                display_items.append(item)
-        if display_items:
-            with st.expander("IRB/Study Administrative Data Summary", expanded=True):
-                for idx, item in enumerate(display_items, start=1):
-                    exp = st.expander(f"{idx}. {item['label']}", expanded=False)
-                    with exp:
-                        cols = st.columns([10, 1])
-                        with cols[0]:
-                            st.markdown(f"**Value:** {item['value']}")
-                            pages = item.get("pages") or []
-                            page_str = ", ".join(f"p. {p}" for p in pages) if pages else "N/A"
+        with st.expander("IRB/Study Administrative Data Summary", expanded=True):
+            for idx, item in enumerate(st.session_state.summary, start=1):
+                exp = st.expander(f"{idx}. {item['label']}", expanded=False)
+                with exp:
+                    status = (item.get("status") or "").upper()
+                    value_str = _stringify_value(item.get("value")).strip()
+                    pages = item.get("pages") or []
+                    page_str = ", ".join(f"p. {p}" for p in pages) if pages else "N/A"
+
+                    cols = st.columns([10, 1])
+                    with cols[0]:
+                        if status == "NOT_FOUND" or value_str.lower() == "not specified" or not value_str:
+                            st.markdown("**Value:** Not available in this document.")
+                            st.caption("Status: NOT_FOUND • References: N/A")
+                            st.write("No supporting quotes captured.")
+                        else:
+                            st.markdown(f"**Value:** {value_str}")
                             st.caption(f"Status: {item['status']} • References: {page_str}")
-                        with cols[1]:
+                    with cols[1]:
+                        if status != "NOT_FOUND" and value_str and value_str.lower() != "not specified":
                             if st.button(
                                 "👁️",
                                 key=f"refs_btn_{meta.get('file_hash')}_{item['id']}",
@@ -777,8 +779,6 @@ if st.session_state.chunks:
                             ):
                                 st.session_state.summary_modal = item
                                 st.rerun()
-        else:
-            st.info("No structured metadata fields were confidently extracted from this document.")
 
     modal_item = st.session_state.get("summary_modal")
     if modal_item:
