@@ -96,6 +96,18 @@ SUMMARY_ITEMS = [
     },
 ]
 
+LLM_REFORMAT_PROMPT = (
+    "You are refining text that was extracted directly from a fillable IRB PDF (not OCR). "
+    "Normalize it into a consistent, parser-friendly structure while keeping every fact."
+    "Rules:\n"
+    "1. Preserve order of questions/sections. Prefix section headers with 'SECTION: ' or 'SUBSECTION: '.\n"
+    "2. Normalize checkboxes/radio buttons: represent as '[x]' or '[ ]' and keep option labels inline.\n"
+    "3. For tables, emit Markdown-like pipes rows with headers if visible.\n"
+    "4. For any fill-in field, use 'Label: {{value}}'; use {{EMPTY}} if blank.\n"
+    "5. Do NOT summarize or omit. Keep full sentences and bullet lists.\n"
+    "6. If content repeats across pages, include markers '[[CONTINUES_ON_NEXT_PAGE]]' etc.\n"
+    "7. Output plain UTF-8 text only."
+)
 
 def _stringify_value(val) -> str:
     if val is None:
@@ -221,12 +233,18 @@ def vision_transcribe_page(doc: fitz.Document, page_index: int, model: str) -> s
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a meticulous OCR agent. Return only the textual transcription, preserving layout when possible.",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "You are a meticulous OCR and form-understanding agent for IRB protocol documents (PDF scans and Word exports).\n\nYour job:\n- Extract EVERY visible piece of information from the page image.\n- Preserve the logical structure (sections, questions, tables, checkboxes, fill-in fields) in a way that is easy for a program to parse.\n- Do NOT summarize, skip, or rephrase. Transcribe verbatim as much as possible.\n\nGENERAL RULES\n1. Do not invent content. If you truly cannot read something, write '[[ILLEGIBLE]]' in its place.\n2. Preserve original spelling, capitalization, and punctuation, even if they look wrong.\n3. Keep the original question order and section order.\n4. Show page breaks as: '--- PAGE BREAK ---'.\n\nSECTIONS & HEADERS\n- Use 'SECTION: <exact title>' for main section headings.\n- Use 'SUBSECTION: <exact title>' for subheadings.\n\nCHECKBOXES AND RADIO BUTTONS\n- Represent all checkboxes and radio buttons using this exact syntax:\n  - Checked:   '[x]'\n  - Unchecked: '[ ]'\n- If a label has multiple options (e.g., YES/NO), keep them on the same line in order. Example:\n  'Is the project funded?  [x] YES   [ ] NO'\n- Treat any mark (X, x, ✓, checkmark, filled box) as checked.\n\nFILL-IN-THE-BLANK FIELDS\n- When a field label is followed by a blank line, transcribe as:\n  'Field Label: {{VALUE}}'\n- If the blank is filled, put the transcribed text inside {{ }}.\n- If the blank is empty, write '{{EMPTY}}'.\n- Example:\n  'Contact Name: {{Julie Kanter}}'\n  'Degree: {{EMPTY}}'\n\nTABLES\n- Represent tables using pipe '|' delimited rows, with one header row if visible.\n- Example:\n  '| Column 1 | Column 2 |\\n| value11 | value12 |\\n| value21 | value22 |'\n- If a cell spans multiple lines, keep the line breaks inside the cell as '\\n' (literal backslash-n).\n\nMULTI-LINE ANSWERS\n- If an answer (like \"Purpose\" or \"Background\") continues across lines or pages, concatenate lines into a single block under the same label.\n- If it continues on the next page, add '[[CONTINUES_ON_NEXT_PAGE]]' at end of the page and '[[CONTINUED_FROM_PREVIOUS_PAGE]]' at the beginning of the continuation.\n\nSIGNATURES & DATES\n- For handwritten signatures, do NOT try to guess the name. Use:\n  'Signature: {{HANDWRITTEN, ILLEGIBLE}}' or 'Signature: {{Printed Name if readable}}'.\n- For dates, transcribe exactly as printed.\n\nMARGINAL NOTES / COMMENTS / STAMPS\n- If any handwritten notes, stamps, or comments are visible, append a 'NOTES:' section at the end of the page listing each note on its own line.\n\nOUTPUT FORMAT\n- Return plain UTF-8 text only. No Markdown, no JSON, no bullet points beyond what is needed for tables or checkboxes.\n- Start the page with 'PAGE: <number if visible or UNKNOWN>'."
+                        }
+                    ]
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Transcribe this IRB form page verbatim."},
+                        {"type": "text",
+                         "text": "Transcribe this IRB form page following the IRB-OCR rules. Do not summarize or omit anything. Return only the transcription text."},
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
                     ],
                 },
@@ -315,6 +333,63 @@ def augment_pdf_with_forms(pdf_bytes: bytes, pages: List[Tuple[int, str]]) -> Li
     return updated
 
 
+def enhance_textual_pages_with_llm(pages: List[Tuple[int, str]], model: str) -> List[Tuple[int, str]]:
+    if not (OPENAI_OK and client):
+        log_event("[enhance] Skipping LLM enhancement (no API key).")
+        return pages
+    enhanced: List[Tuple[int, str]] = []
+    batch_size = 20
+    total_pages = len(pages)
+    for start in range(0, total_pages, batch_size):
+        batch = pages[start : start + batch_size]
+        batch_numbers = [pno for pno, _ in batch]
+        log_event(f"[enhance] Reformatting pages {batch_numbers} via {model}")
+        content_blocks = []
+        for pno, text in batch:
+            if not text.strip():
+                enhanced.append((pno, text))
+                continue
+            block = f"--- PAGE {pno} ---\n{text}"
+            content_blocks.append(block)
+        if not content_blocks:
+            continue
+        user_content = (
+            "Rewrite the following IRB PDF text using the normalization rules. "
+            "Return the fully reformatted pages separated by '--- PAGE <number> ---'.\n\n"
+            + "\n\n".join(content_blocks)
+        )
+        params = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": LLM_REFORMAT_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if supports_temperature(model):
+            params["temperature"] = 0.1
+        try:
+            resp = client.chat.completions.create(**params)
+            reformatted = resp.choices[0].message.content.strip()
+            segments = re.split(r"---\s*PAGE\s*(\d+)\s*---", reformatted)
+            page_map = {}
+            i = 1
+            while i < len(segments):
+                pnum = segments[i].strip()
+                text_block = segments[i + 1].strip()
+                try:
+                    page_map[int(pnum)] = text_block
+                except Exception:
+                    pass
+                i += 2
+            for pno, orig_text in batch:
+                enhanced.append((pno, page_map.get(pno, orig_text)))
+        except Exception as exc:
+            log_event(f"[enhance] Batch {batch_numbers} failed: {exc}. Using original text.")
+            for pno, orig_text in batch:
+                enhanced.append((pno, orig_text))
+    return enhanced
+
+
 # -----------------------------------------------------------------------------
 # Chunking & embeddings
 # -----------------------------------------------------------------------------
@@ -370,9 +445,9 @@ def _model_slug(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", name)
 
 
-def _cache_bucket(file_hash: str, embed_model: str, vision_flag: bool) -> Path:
+def _cache_bucket(file_hash: str, embed_model: str, vision_flag: bool, llm_flag: bool) -> Path:
     model_slug = _model_slug(embed_model)
-    return CACHE_DIR / file_hash[:16] / f"{model_slug}_{int(bool(vision_flag))}"
+    return CACHE_DIR / file_hash[:16] / f"{model_slug}_{int(bool(vision_flag))}_{int(bool(llm_flag))}"
 
 
 def _chunks_to_json(chunks: List[DocChunk]) -> List[Dict[str, Any]]:
@@ -383,8 +458,8 @@ def _chunks_from_json(payload: List[Dict[str, Any]]) -> List[DocChunk]:
     return [DocChunk(page=int(item["page"]), text=item["text"]) for item in payload]
 
 
-def load_cached_index(file_hash: str, embed_model: str, vision_flag: bool):
-    bucket = _cache_bucket(file_hash, embed_model, vision_flag)
+def load_cached_index(file_hash: str, embed_model: str, vision_flag: bool, llm_flag: bool):
+    bucket = _cache_bucket(file_hash, embed_model, vision_flag, llm_flag)
     meta_path = bucket / "meta.json"
     chunks_path = bucket / "chunks.json"
     emb_path = bucket / "embeddings.npy"
@@ -411,6 +486,9 @@ def load_cached_index(file_hash: str, embed_model: str, vision_flag: bool):
     if bool(meta.get("vision_enabled")) != bool(vision_flag):
         log_event("[cache] miss – vision flag mismatch")
         return None
+    if bool(meta.get("llm_enhanced")) != bool(llm_flag):
+        log_event("[cache] miss – LLM enhancement flag mismatch")
+        return None
     try:
         embeddings = np.load(emb_path)
         chunk_data = json.loads(chunks_path.read_text(encoding="utf-8"))
@@ -429,11 +507,12 @@ def save_cached_index(
     file_hash: str,
     embed_model: str,
     vision_flag: bool,
+    llm_flag: bool,
     chunks: List[DocChunk],
     embeddings: np.ndarray,
     meta: Dict[str, Any],
 ):
-    bucket = _cache_bucket(file_hash, embed_model, vision_flag)
+    bucket = _cache_bucket(file_hash, embed_model, vision_flag, llm_flag)
     bucket.mkdir(parents=True, exist_ok=True)
     np.save(bucket / "embeddings.npy", embeddings)
     (bucket / "chunks.json").write_text(
@@ -446,6 +525,7 @@ def save_cached_index(
             "file_hash": file_hash,
             "embed_model": embed_model,
             "vision_enabled": bool(vision_flag),
+            "llm_enhanced": bool(llm_flag),
             "chunk_checksum": chunks_checksum(chunks),
             "cache_version": CACHE_VERSION,
             "chunker_version": CHUNKER_VERSION,
@@ -667,6 +747,15 @@ with st.sidebar:
         value=False,
         disabled=not OPENAI_OK,
     )
+    llm_embed_choice = st.radio(
+        "LLM-enhanced embeddings for text PDFs",
+        options=["Off", "On"],
+        index=0,
+        horizontal=True,
+        disabled=not OPENAI_OK,
+        help="If on, pass clickable PDF text through the agent model before embedding.",
+    )
+    llm_embed_enabled = llm_embed_choice == "On"
     top_k = st.slider("Top-k passages", min_value=3, max_value=10, value=6, step=1)
 
 if "chunks" not in st.session_state:
@@ -678,6 +767,7 @@ if "summary" not in st.session_state:
     st.session_state.summary_meta = {}
 if "summary_modal" not in st.session_state:
     st.session_state.summary_modal = None
+st.session_state["llm_enhance_pref"] = llm_embed_enabled
 
 if uploaded and OPENAI_OK:
     raw_bytes = uploaded.read()
@@ -689,7 +779,12 @@ if uploaded and OPENAI_OK:
             f"Received '{uploaded.name}' ({len(raw_bytes)/1024:.1f} KB) hash={file_hash[:12]}… embed_model={embed_model} vision={vision_rescue}"
         )
         log_event("Checking local cache…")
-        cache_payload = load_cached_index(file_hash, embed_model, vision_rescue)
+        llm_enhance_active = (
+            llm_embed_enabled
+            and uploaded.name.lower().endswith(".pdf")
+            and not vision_rescue
+        )
+        cache_payload = load_cached_index(file_hash, embed_model, vision_rescue, llm_enhance_active)
         if cache_payload:
             log_event("Cache hit – skipping re-embedding.")
             chunks = cache_payload["chunks"]
@@ -704,6 +799,7 @@ if uploaded and OPENAI_OK:
                 "agent_model": agent_model,
                 "embed_model": embed_model,
                 "vision_enabled": vision_rescue,
+                "llm_enhanced": llm_enhance_active,
                 "file_hash": file_hash,
                 "cache_hit": True,
             }
@@ -715,6 +811,9 @@ if uploaded and OPENAI_OK:
                 if uploaded.name.lower().endswith(".pdf"):
                     log_event("Augmenting PDF with AcroForm data.")
                     pages = augment_pdf_with_forms(raw_bytes, pages)
+                    if llm_enhance_active:
+                        log_event("Applying LLM enhancement to textual PDF pages…")
+                        pages = enhance_textual_pages_with_llm(pages, agent_model)
 
                 log_event(f"Chunking {len(pages)} pages…")
                 chunks = split_chunks(pages)
@@ -731,13 +830,22 @@ if uploaded and OPENAI_OK:
                         "n_pages": len(pages),
                         "n_chunks": len(chunks),
                     }
-                    save_cached_index(file_hash, embed_model, vision_rescue, chunks, embeddings, base_meta)
+                    save_cached_index(
+                        file_hash,
+                        embed_model,
+                        vision_rescue,
+                        llm_enhance_active,
+                        chunks,
+                        embeddings,
+                        base_meta,
+                    )
                     meta = {
                         **base_meta,
                         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "agent_model": agent_model,
                         "embed_model": embed_model,
                         "vision_enabled": vision_rescue,
+                        "llm_enhanced": llm_enhance_active,
                         "file_hash": file_hash,
                         "cache_hit": False,
                     }
@@ -745,16 +853,21 @@ if uploaded and OPENAI_OK:
             st.session_state.chunks = chunks
             st.session_state.index = index
             st.session_state.meta = meta
-            if st.session_state.summary_meta.get("file_hash") != meta.get("file_hash"):
+            if (
+                st.session_state.summary_meta.get("file_hash") != meta.get("file_hash")
+                or st.session_state.summary_meta.get("llm_enhanced") != meta.get("llm_enhanced")
+            ):
                 st.session_state.summary = None
                 st.session_state.summary_meta = {}
+            st.session_state.summary_modal = None
 
 if st.session_state.chunks:
     meta = st.session_state.meta
     note = f" • Vision rescue: {'on' if meta.get('vision_enabled') else 'off'}"
+    llm_note = f" • LLM enhancement: {'on' if meta.get('llm_enhanced') else 'off'}"
     cache_note = f" • Cache: {'hit' if meta.get('cache_hit') else 'miss'}"
     st.caption(
-        f"**Loaded:** {meta['filename']} • Pages: {meta['n_pages']} • Chunks: {meta['n_chunks']} • Agent: {meta['agent_model']} • Embed: {meta['embed_model']}{note}{cache_note}"
+        f"**Loaded:** {meta['filename']} • Pages: {meta['n_pages']} • Chunks: {meta['n_chunks']} • Agent: {meta['agent_model']} • Embed: {meta['embed_model']}{note}{llm_note}{cache_note}"
     )
 
     if st.session_state.get("summary_pref") and st.session_state.index:
@@ -763,6 +876,7 @@ if st.session_state.chunks:
             or st.session_state.summary_meta.get("file_hash") != meta.get("file_hash")
             or st.session_state.summary_meta.get("agent_model") != meta.get("agent_model")
             or st.session_state.summary_meta.get("embed_model") != meta.get("embed_model")
+            or st.session_state.summary_meta.get("llm_enhanced") != meta.get("llm_enhanced")
         )
         if needs_summary:
             with st.spinner("Summarizing IRB/Study Administrative Data…"):
@@ -778,6 +892,7 @@ if st.session_state.chunks:
                     "file_hash": meta.get("file_hash"),
                     "agent_model": meta.get("agent_model"),
                     "embed_model": meta.get("embed_model"),
+                    "llm_enhanced": meta.get("llm_enhanced"),
                     "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
 
