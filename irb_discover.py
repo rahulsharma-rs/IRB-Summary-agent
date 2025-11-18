@@ -107,6 +107,16 @@ def _stringify_value(val) -> str:
     return str(val)
 
 
+def supports_temperature(model: str) -> bool:
+    if not model:
+        return True
+    lowered = model.lower()
+    # Many reasoning or nano models enforce default temp
+    if lowered.startswith("gpt-5") or lowered.startswith("o1") or lowered.startswith("o3"):
+        return False
+    return True
+
+
 def log_event(message: str):
     print(f"[IRB] {message}", flush=True)
 
@@ -206,10 +216,9 @@ def vision_transcribe_page(doc: fitz.Document, page_index: int, model: str) -> s
         page = doc[page_index]
         pix = page.get_pixmap(dpi=220)
         image_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            messages=[
+        params = {
+            "model": model,
+            "messages": [
                 {
                     "role": "system",
                     "content": "You are a meticulous OCR agent. Return only the textual transcription, preserving layout when possible.",
@@ -222,7 +231,10 @@ def vision_transcribe_page(doc: fitz.Document, page_index: int, model: str) -> s
                     ],
                 },
             ],
-        )
+        }
+        if supports_temperature(model):
+            params["temperature"] = 0.1
+        resp = client.chat.completions.create(**params)
         return resp.choices[0].message.content.strip()
     except Exception:
         return ""
@@ -506,18 +518,27 @@ def agentic_answer(question: str, context_blocks: List[Dict[str, Any]], model: s
         "2. Produce the final answer with citations like (p. X).\n"
         "If information is missing, say so explicitly. Be concise."
     )
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0.2,
-        messages=[
+    params = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": prompt},
             {
                 "role": "user",
                 "content": f"Question: {question}\n\nContext:\n{context}",
             },
         ],
-    )
-    return resp.choices[0].message.content.strip()
+    }
+    if supports_temperature(model):
+        params["temperature"] = 0.2
+    log_event(f"[agent] Calling {model} with {len(context_blocks)} context blocks")
+    try:
+        resp = client.chat.completions.create(**params)
+        answer = resp.choices[0].message.content.strip()
+        log_event(f"[agent] Model responded with {len(answer)} chars")
+        return answer
+    except Exception as exc:
+        log_event(f"[agent] LLM call failed: {exc}")
+        return "Agent error: unable to generate answer at this time."
 
 
 # -----------------------------------------------------------------------------
@@ -551,20 +572,23 @@ def summarize_field(item: Dict[str, str], hits: List[Dict[str, Any]], model: str
         f"Context:\n{context}"
     )
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            messages=[
+        params = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": SUMMARY_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-        )
+        }
+        if supports_temperature(model):
+            params["temperature"] = 0.1
+        resp = client.chat.completions.create(**params)
         raw = resp.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", raw)
             raw = raw.rstrip("`").strip()
         parsed = json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        log_event(f"[summary] LLM failure for '{item['label']}': {exc}")
         parsed = {
             "field": item["label"],
             "value": "Not specified",
@@ -587,8 +611,14 @@ def summarize_metadata(chunks: List[DocChunk], index: SimpleIndex, embed_model: 
         return []
     results: List[Dict[str, Any]] = []
     for item in SUMMARY_ITEMS:
+        t0 = time.time()
+        log_event(f"[summary] Processing '{item['label']}' with model={agent_model}")
         hits = retrieve(index, chunks, item["query"], model=embed_model, k=4)
+        log_event(f"[summary] Retrieved {len(hits)} chunks for '{item['label']}'")
         summary = summarize_field(item, hits, model=agent_model)
+        log_event(
+            f"[summary] Completed '{item['label']}' status={summary['status']} in {time.time()-t0:.2f}s"
+        )
         summary["hits"] = hits
         results.append(summary)
     return results
@@ -777,26 +807,34 @@ if st.session_state.chunks:
                                 key=f"refs_btn_{meta.get('file_hash')}_{item['id']}",
                                 help="View references and supporting evidence",
                             ):
-                                st.session_state.summary_modal = item
+                                st.session_state.summary_modal = {
+                                    "id": item["id"],
+                                    "label": item["label"],
+                                    "pages": item.get("pages") or [],
+                                    "evidence": item.get("evidence") or [],
+                                }
                                 st.rerun()
 
-    modal_item = st.session_state.get("summary_modal")
-    if modal_item:
-        ref_pages = modal_item.get("pages") or []
-        ref_text = ", ".join(f"p. {p}" for p in ref_pages) if ref_pages else "N/A"
-        evidence = modal_item.get("evidence") or []
-        st.markdown("---")
-        st.markdown(f"### References – {modal_item['label']}")
-        st.markdown(f"**References:** {ref_text}")
-        st.markdown("**Evidence**")
-        if evidence:
-            for ev in evidence:
-                st.write(f"• {ev}")
-        else:
-            st.write("No supporting quotes captured.")
-        if st.button("Close references panel", key="close_summary_modal"):
-            st.session_state.summary_modal = None
-            st.rerun()
+                modal_item = st.session_state.get("summary_modal")
+                if modal_item and modal_item.get("id") == item["id"]:
+                    ref_pages = modal_item.get("pages") or []
+                    ref_text = ", ".join(f"p. {p}" for p in ref_pages) if ref_pages else "N/A"
+                    evidence = modal_item.get("evidence") or []
+                    st.markdown("---")
+                    st.markdown(f"**References:** {ref_text}")
+                    st.markdown("**Evidence**")
+                    if evidence:
+                        for ev in evidence:
+                            st.write(f"• {ev}")
+                    else:
+                        st.write("No supporting quotes captured.")
+                    if st.button(
+                        "Hide references",
+                        key=f"close_refs_{item['id']}",
+                    ):
+                        st.session_state.summary_modal = None
+                        st.rerun()
+
 
     st.markdown("#### Ask the agent")
     default_q = "List every Yes/No prompt and whether it was marked."
@@ -806,6 +844,7 @@ if st.session_state.chunks:
             st.error("Enter a question.")
         else:
             with st.spinner("Retrieving supporting context…"):
+                log_event(f"[agent] User question: {question.strip()}")
                 hits = retrieve(
                     st.session_state.index,
                     st.session_state.chunks,
