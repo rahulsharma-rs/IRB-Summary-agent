@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  irb_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: irb-agent
+    ports:
+      - "8502:8502"
+    env_file:
+      - .env
+    environment:
+      STREAMLIT_SERVER_BASEURLPATH: "/irb"
+    volumes:
+      - rag_cache:/app/.rag_cache
+      - uploads:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  rag_cache:
+  uploads:
