@@ -12,9 +12,11 @@ services:
       - .env
     environment:
       STREAMLIT_SERVER_BASEURLPATH: "/irb"
+      STREAMLIT_SERVER_ENABLEXSRFPROTECTION: "false"  # Add this
     volumes:
       - rag_cache:/app/.rag_cache
       - uploads:/app/uploads
+      - ./.streamlit:/app/.streamlit  # Mount config
     restart: unless-stopped
 
 volumes:

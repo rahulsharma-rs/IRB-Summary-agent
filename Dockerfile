@@ -34,4 +34,4 @@ USER appuser
 
 EXPOSE 8502
 
-CMD ["streamlit", "run", "irb_discover.py"]
+CMD ["streamlit", "run", "irb_discover_v1.py"]

@@ -22,6 +22,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 import fitz  # PyMuPDF
 
+
 try:
     import docx  # python-docx
     HAS_DOCX = True
@@ -44,6 +45,8 @@ DEFAULT_EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
 CACHE_DIR = Path(".rag_cache")
 CACHE_VERSION = 1
 CHUNKER_VERSION = 1
+
+MAX_FILE_SIZE_MB = 200
 
 
 def log_event(message: str):
@@ -478,7 +481,12 @@ if not OPENAI_OK:
 
 with st.sidebar:
     st.markdown("### Upload Protocol")
-    uploaded = st.file_uploader("PDF, DOCX, or TXT", type=["pdf", "docx", "doc", "txt"])
+    st.info(f"Maximum file size: {MAX_FILE_SIZE_MB}MB")
+    uploaded = st.file_uploader(
+        "PDF, DOCX, or TXT",
+        type=["pdf", "docx", "doc", "txt"],
+        help=f"Upload IRB protocol documents (max {MAX_FILE_SIZE_MB}MB)"
+    )
 
     st.markdown("---")
     st.markdown("### Agent Settings")
@@ -509,12 +517,18 @@ if "chunks" not in st.session_state:
 
 if uploaded and OPENAI_OK:
     raw_bytes = uploaded.read()
+
+    # Validate file size
+    file_size_mb = len(raw_bytes) / (1024 * 1024)
+
     if not raw_bytes:
         st.error("Uploaded file is empty.")
+    elif file_size_mb > MAX_FILE_SIZE_MB:
+        st.error(f"File too large ({file_size_mb:.1f}MB). Maximum size is {MAX_FILE_SIZE_MB}MB.")
     else:
         file_hash = compute_file_hash(raw_bytes)
         log_event(
-            f"Received '{uploaded.name}' ({len(raw_bytes)/1024:.1f} KB) hash={file_hash[:12]}… embed_model={embed_model} vision={vision_rescue}"
+            f"Received '{uploaded.name}' ({file_size_mb:.1f} MB) hash={file_hash[:12]}… embed_model={embed_model} vision={vision_rescue}"
         )
         log_event("Checking local cache…")
         cache_payload = load_cached_index(file_hash, embed_model, vision_rescue)
