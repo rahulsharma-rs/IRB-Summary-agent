@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+
+{% block title %}{{ document.study_title or document.filename }} - IRB Explorer{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>{{ document.study_title or document.filename }}</h2>
+    <div style="display: flex; gap: 1rem; align-items: center;">
+        <span class="status-badge status-{{ document.protocol_status or 'unknown' }}">
+            {{ document.protocol_status or 'Unknown' }}
+        </span>
+        {% if document.extraction_status in ['failed', 'partial'] %}
+        <button id="re-extract-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
+            🔄 Re-extract Metadata
+        </button>
+        {% endif %}
+    </div>
+</div>
+
+<div class="document-layout">
+    <!-- Metadata Panel -->
+    <div class="metadata-panel">
+        <h3>Document Metadata</h3>
+
+        <div class="metadata-grid">
+            <div class="metadata-item">
+                <label>IRB Number</label>
+                <value>{{ document.irb_number or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Principal Investigator</label>
+                <value>{{ document.principal_investigator or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Protocol Status</label>
+                <value>{{ document.protocol_status or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Expiration Date</label>
+                <value>{{ document.expiration_date or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item full-width">
+                <label>Study Purpose</label>
+                <value>{{ document.study_purpose or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item full-width">
+                <label>Inclusion Criteria</label>
+                <value>{{ document.inclusion_criteria or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item full-width">
+                <label>Exclusion Criteria</label>
+                <value>{{ document.exclusion_criteria or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item full-width">
+                <label>Approved Data Elements</label>
+                <value>{{ document.data_elements or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Funding Source</label>
+                <value>{{ document.funding_source or 'Not specified' }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>File Name</label>
+                <value>{{ document.filename }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Upload Date</label>
+                <value>{{ document.upload_date.strftime('%Y-%m-%d %H:%M') }}</value>
+            </div>
+
+            <div class="metadata-item">
+                <label>Pages / Chunks</label>
+                <value>{{ document.n_pages }} pages / {{ document.n_chunks }} chunks</value>
+            </div>
+        </div>
+    </div>
+
+    <!-- Query Panel -->
+    <div class="query-panel">
+        <h3>Ask Questions About This Document</h3>
+
+        <form id="query-form">
+            <textarea id="question-input"
+                      placeholder="e.g., What are the inclusion criteria? What data elements are approved?"
+                      rows="3"></textarea>
+
+            <button type="submit" class="btn btn-primary" id="query-btn">
+                <span class="btn-text">Ask Question</span>
+                <span class="spinner" style="display: none;">⏳</span>
+            </button>
+        </form>
+
+        <div id="query-status" class="status-message" style="display: none;"></div>
+
+        <div id="answer-section" style="display: none;">
+            <h4>Answer</h4>
+            <div id="answer-content" class="answer-box"></div>
+
+            <h4>Context Used</h4>
+            <div id="context-content" class="context-list"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const queryForm = document.getElementById('query-form');
+const questionInput = document.getElementById('question-input');
+const queryBtn = document.getElementById('query-btn');
+const statusDiv = document.getElementById('query-status');
+const answerSection = document.getElementById('answer-section');
+const answerContent = document.getElementById('answer-content');
+const contextContent = document.getElementById('context-content');
+
+// Re-extraction handler
+const reExtractBtn = document.getElementById('re-extract-btn');
+if (reExtractBtn) {
+    reExtractBtn.addEventListener('click', async () => {
+        if (!confirm('Re-extract all metadata fields? This will take 20-30 seconds.')) {
+            return;
+        }
+
+        reExtractBtn.disabled = true;
+        reExtractBtn.textContent = '⏳ Re-extracting...';
+
+        try {
+            const response = await fetch('/api/re-extract/{{ document.id }}', {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                alert(`Re-extraction completed!\n${data.extraction_summary.successful} fields extracted successfully.`);
+                location.reload();
+            } else {
+                alert('Error: ' + data.error);
+                reExtractBtn.disabled = false;
+                reExtractBtn.textContent = '🔄 Re-extract Metadata';
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+            reExtractBtn.disabled = false;
+            reExtractBtn.textContent = '🔄 Re-extract Metadata';
+        }
+    });
+}
+
+queryForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const question = questionInput.value.trim();
+    if (!question) {
+        showStatus('Please enter a question', 'error');
+        return;
+    }
+
+    // Show loading
+    queryBtn.disabled = true;
+    queryBtn.querySelector('.btn-text').style.display = 'none';
+    queryBtn.querySelector('.spinner').style.display = 'inline';
+    statusDiv.style.display = 'none';
+    answerSection.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/query/{{ document.id }}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ question: question })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            // Show answer
+            answerContent.textContent = data.answer;
+
+            // Show context
+            contextContent.innerHTML = '';
+            data.context.forEach((ctx, idx) => {
+                const ctxDiv = document.createElement('div');
+                ctxDiv.className = 'context-item';
+
+                const badge = ctx.score >= 0.6 ? '🟢' : (ctx.score >= 0.4 ? '🟡' : '🔴');
+
+                ctxDiv.innerHTML = `
+                    <div class="context-header">
+                        <span>${badge} <strong>#${idx + 1}</strong> Score: ${ctx.score.toFixed(3)} • Page ${ctx.page}</span>
+                    </div>
+                    <div class="context-text">${ctx.text}</div>
+                `;
+
+                contextContent.appendChild(ctxDiv);
+            });
+
+            answerSection.style.display = 'block';
+        } else {
+            showStatus(data.error || 'Query failed', 'error');
+        }
+    } catch (error) {
+        showStatus('Network error: ' + error.message, 'error');
+    } finally {
+        queryBtn.disabled = false;
+        queryBtn.querySelector('.btn-text').style.display = 'inline';
+        queryBtn.querySelector('.spinner').style.display = 'none';
+    }
+});
+
+function showStatus(message, type) {
+    statusDiv.textContent = message;
+    statusDiv.className = 'status-message ' + type;
+    statusDiv.style.display = 'block';
+}
+</script>
+{% endblock %}

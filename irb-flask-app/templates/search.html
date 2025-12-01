@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Search Documents - IRB Explorer{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Search IRB Documents</h2>
+    <p class="subtitle">Find protocols by IRB number, PI, title, or keyword</p>
+</div>
+
+<div class="search-section">
+    <form method="GET" action="{{ url_for('search') }}" class="search-form">
+        <div class="search-row">
+            <input type="text"
+                   name="q"
+                   placeholder="Search title, purpose, PI..."
+                   value="{{ query }}"
+                   class="search-input">
+            <button type="submit" class="btn btn-primary">🔍 Search</button>
+        </div>
+
+        <div class="filters-row">
+            <input type="text"
+                   name="irb"
+                   placeholder="IRB Number"
+                   value="{{ irb_number }}"
+                   class="filter-input">
+
+            <input type="text"
+                   name="pi"
+                   placeholder="Principal Investigator"
+                   value="{{ pi_name }}"
+                   class="filter-input">
+
+            <select name="status" class="filter-select">
+                <option value="">All Statuses</option>
+                <option value="approved" {% if status == 'approved' %}selected{% endif %}>Approved</option>
+                <option value="pending" {% if status == 'pending' %}selected{% endif %}>Pending</option>
+                <option value="expired" {% if status == 'expired' %}selected{% endif %}>Expired</option>
+                <option value="exempt" {% if status == 'exempt' %}selected{% endif %}>Exempt</option>
+                <option value="withdrawn" {% if status == 'withdrawn' %}selected{% endif %}>Withdrawn</option>
+            </select>
+        </div>
+    </form>
+</div>
+
+<div class="results-section">
+    {% if results %}
+        <p class="results-count">Found <strong>{{ results|length }}</strong> documents</p>
+
+        <div class="results-list">
+            {% for doc in results %}
+            <div class="result-card">
+                <div class="result-header">
+                    <h3>
+                        <a href="{{ url_for('document_detail', doc_id=doc.id) }}">
+                            {{ doc.study_title or 'Untitled Study' }}
+                        </a>
+                    </h3>
+                    <span class="status-badge status-{{ doc.protocol_status or 'unknown' }}">
+                        {{ doc.protocol_status or 'Unknown' }}
+                    </span>
+                </div>
+
+                <div class="result-meta">
+                    {% if doc.irb_number %}
+                    <span class="meta-item">
+                        <strong>IRB:</strong> {{ doc.irb_number }}
+                    </span>
+                    {% endif %}
+
+                    {% if doc.principal_investigator %}
+                    <span class="meta-item">
+                        <strong>PI:</strong> {{ doc.principal_investigator }}
+                    </span>
+                    {% endif %}
+
+                    <span class="meta-item">
+                        <strong>Uploaded:</strong> {{ doc.upload_date.strftime('%Y-%m-%d') }}
+                    </span>
+                </div>
+
+                {% if doc.study_purpose %}
+                <p class="result-purpose">{{ doc.study_purpose[:200] }}{% if doc.study_purpose|length > 200 %}...{% endif %}</p>
+                {% endif %}
+
+                <div class="result-footer">
+                    <span class="file-info">📄 {{ doc.filename }}</span>
+                    <span class="chunk-info">{{ doc.n_pages }} pages • {{ doc.n_chunks }} chunks</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    {% elif query or irb_number or pi_name or status %}
+        <div class="no-results">
+            <p>No documents found matching your search criteria.</p>
+            <p class="hint">Try different keywords or remove some filters.</p>
+        </div>
+    {% else %}
+        <div class="no-results">
+            <p>Enter search terms above to find documents.</p>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

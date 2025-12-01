@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Document - IRB Explorer{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Upload IRB Protocol Document</h2>
+    <p class="subtitle">Supported formats: PDF, DOCX, TXT</p>
+</div>
+
+<div class="upload-section">
+    <form id="upload-form" enctype="multipart/form-data">
+        <div class="file-input-wrapper">
+            <input type="file"
+                   id="file-input"
+                   name="file"
+                   accept=".pdf,.docx,.doc,.txt"
+                   required>
+            <label for="file-input" class="file-label">
+                <span class="file-icon">📄</span>
+                <span class="file-text">Choose a file or drag here</span>
+                <span class="file-hint">Max size: 50MB</span>
+            </label>
+        </div>
+
+        <button type="submit" class="btn btn-primary" id="upload-btn">
+            <span class="btn-text">Upload & Process</span>
+            <span class="spinner" style="display: none;">⏳</span>
+        </button>
+    </form>
+
+    <div id="upload-status" class="status-message" style="display: none;"></div>
+</div>
+
+<div class="info-section">
+    <h3>What happens after upload?</h3>
+    <ol class="process-list">
+        <li><strong>Document parsing</strong> - Extracts text from your file</li>
+        <li><strong>Metadata extraction</strong> - Identifies IRB number, PI, study details</li>
+        <li><strong>Chunking & embedding</strong> - Prepares document for AI queries</li>
+        <li><strong>Indexing</strong> - Makes document searchable</li>
+    </ol>
+
+    <div class="note-box">
+        <strong>Note:</strong> Duplicate documents (same file hash) won't be re-processed.
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const form = document.getElementById('upload-form');
+const fileInput = document.getElementById('file-input');
+const uploadBtn = document.getElementById('upload-btn');
+const statusDiv = document.getElementById('upload-status');
+
+// File input change handler
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        const label = document.querySelector('.file-text');
+        label.textContent = file.name;
+    }
+});
+
+// Form submit handler
+form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const file = fileInput.files[0];
+    if (!file) {
+        showStatus('Please select a file', 'error');
+        return;
+    }
+
+    // Show loading state
+    uploadBtn.disabled = true;
+    uploadBtn.querySelector('.btn-text').style.display = 'none';
+    uploadBtn.querySelector('.spinner').style.display = 'inline';
+    statusDiv.style.display = 'none';
+
+    // Create form data
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            showStatus(data.message, 'success');
+            setTimeout(() => {
+                window.location.href = data.redirect;
+            }, 1000);
+        } else {
+            showStatus(data.error || 'Upload failed', 'error');
+            resetButton();
+        }
+    } catch (error) {
+        showStatus('Network error: ' + error.message, 'error');
+        resetButton();
+    }
+});
+
+function showStatus(message, type) {
+    statusDiv.textContent = message;
+    statusDiv.className = 'status-message ' + type;
+    statusDiv.style.display = 'block';
+}
+
+function resetButton() {
+    uploadBtn.disabled = false;
+    uploadBtn.querySelector('.btn-text').style.display = 'inline';
+    uploadBtn.querySelector('.spinner').style.display = 'none';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}IRB Protocol Explorer{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>🛰️ IRB Explorer</h1>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="{{ url_for('index') }}" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}">
+                    📤 Upload Document
+                </a>
+                <a href="{{ url_for('search') }}" class="nav-link {% if request.endpoint == 'search' %}active{% endif %}">
+                    🔍 Search Documents
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="stats-box">
+                    <h3>Database Stats</h3>
+                    <div id="stats-content">
+                        <p>Loading...</p>
+                    </div>
+                </div>
+
+                <p class="version">Version 1.0</p>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <script>
+        // Load stats
+        fetch('/api/stats')
+            .then(r => r.json())
+            .then(data => {
+                const html = `
+                    <p><strong>${data.total_documents}</strong> documents</p>
+                    <p><strong>${data.total_chunks}</strong> chunks indexed</p>
+                `;
+                document.getElementById('stats-content').innerHTML = html;
+            })
+            .catch(e => {
+                document.getElementById('stats-content').innerHTML = '<p>Error loading stats</p>';
+            });
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
