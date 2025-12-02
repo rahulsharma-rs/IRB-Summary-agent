@@ -8,7 +8,7 @@ from models.database import db, init_db, Document, DocumentChunk
 from models.document import (
     extract_pages, chunk_text, compute_file_hash, get_full_text
 )
-from services.extractor import extract_metadata
+from services.extractor import extract_metadata, parse_date
 from services.embedder import embed_texts, embed_single, find_similar_chunks
 from services.searcher import search_documents, get_document_stats
 
@@ -69,6 +69,9 @@ def upload_file():
         try:
             print(f"[EXTRACTION] Starting parallel extraction for {file.filename}")
             metadata = extract_metadata(full_text, pages_text=pages)
+            exp_date = metadata.get('expiration_date')
+            if isinstance(exp_date, str):
+                metadata['expiration_date'] = parse_date(exp_date)
 
             # Check extraction summary
             summary = metadata.pop('_extraction_summary', {})
@@ -315,7 +318,12 @@ def extract_field_endpoint(doc_id):
 
         # Update document if successful
         if result['status'] == 'success' and result['value']:
-            setattr(doc, field_name, result['value'])
+            new_value = result['value']
+            if field_name == 'expiration_date':
+                new_value = parse_date(new_value)
+                if not new_value:
+                    return jsonify({'error': 'Extracted expiration_date could not be parsed'}), 400
+            setattr(doc, field_name, new_value)
             db.session.commit()
 
         return jsonify(result)
@@ -364,6 +372,8 @@ def re_extract_metadata(doc_id):
         # Update document fields
         for key, value in metadata.items():
             if hasattr(doc, key):
+                if key == 'expiration_date' and isinstance(value, str):
+                    value = parse_date(value)
                 setattr(doc, key, value)
 
         # Update page references
@@ -432,6 +442,12 @@ def update_metadata(doc_id):
                     value = None
                 elif isinstance(value, str):
                     value = value.strip() or None
+
+                if field == 'expiration_date' and value:
+                    parsed_date = parse_date(value)
+                    if not parsed_date:
+                        return jsonify({'error': 'Invalid expiration_date format. Use YYYY-MM-DD or a recognizable date.'}), 400
+                    value = parsed_date
 
                 setattr(doc, field, value)
                 updated_fields.append(field)

@@ -1,7 +1,8 @@
+import calendar
 import json
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
@@ -459,7 +460,8 @@ def extract_single_field(field_name: str, document_text: str, model: str = None,
             'messages': [
                 {"role": "system", "content": prompt_config['system']},
                 {"role": "user", "content": user_prompt}
-            ]
+            ],
+            'response_format': {"type": "json_object"}
         }
 
         # Handle different parameter names based on model
@@ -650,10 +652,29 @@ def normalize_metadata(metadata: dict) -> dict:
     return normalized
 
 
-def parse_date(date_string: str) -> str:
-    """Parse various date formats to ISO format (YYYY-MM-DD)"""
-    if not date_string:
+def parse_date(date_string: str) -> Optional[date]:
+    """
+    Parse various date formats to a Python date object.
+    Returns None when parsing fails.
+    """
+    if date_string is None:
         return None
+
+    if isinstance(date_string, datetime):
+        return date_string.date()
+    if isinstance(date_string, date):
+        return date_string
+
+    value = str(date_string).strip()
+    if not value:
+        return None
+
+    # If a range is provided like "1/1/2024 - 12/31/2024", take the end date
+    if " - " in value:
+        last_part = value.split("-")[-1].strip()
+        parsed = parse_date(last_part)
+        if parsed:
+            return parsed
 
     formats = [
         '%Y-%m-%d',
@@ -668,12 +689,34 @@ def parse_date(date_string: str) -> str:
 
     for fmt in formats:
         try:
-            dt = datetime.strptime(date_string, fmt)
-            return dt.strftime('%Y-%m-%d')
+            return datetime.strptime(value, fmt).date()
         except ValueError:
             continue
 
-    return date_string
+    # Handle month/year only (e.g., "December 2024" or "12/2024")
+    month_year_match = re.match(r'^(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{4})$', value, re.IGNORECASE)
+    if month_year_match:
+        month_name, year_str = month_year_match.groups()
+        try:
+            try:
+                month_num = datetime.strptime(month_name, '%B').month
+            except ValueError:
+                month_num = datetime.strptime(month_name, '%b').month
+            year_num = int(year_str)
+            last_day = calendar.monthrange(year_num, month_num)[1]
+            return datetime(year_num, month_num, last_day).date()
+        except Exception:
+            return None
+
+    numeric_month_year = re.match(r'^(\d{1,2})[/-](\d{4})$', value)
+    if numeric_month_year:
+        month_num = int(numeric_month_year.group(1))
+        year_num = int(numeric_month_year.group(2))
+        if 1 <= month_num <= 12:
+            last_day = calendar.monthrange(year_num, month_num)[1]
+            return datetime(year_num, month_num, last_day).date()
+
+    return None
 
 
 # API endpoint function for single-field extraction
