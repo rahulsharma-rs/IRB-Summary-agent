@@ -1,9 +1,16 @@
+import os
 import numpy as np
 from typing import List
 from openai import OpenAI
 from config import Config
 
-client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+def get_openai_client():
+    """Return an OpenAI client or raise a clear error if the key is missing."""
+    api_key = Config.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set. Please set it in the environment.")
+    return OpenAI(api_key=api_key)
 
 
 def embed_texts(texts: List[str], model: str = None) -> np.ndarray:
@@ -23,6 +30,7 @@ def embed_texts(texts: List[str], model: str = None) -> np.ndarray:
     if not texts:
         return np.array([])
 
+    client = get_openai_client()
     embeddings = []
     batch_size = 64
 

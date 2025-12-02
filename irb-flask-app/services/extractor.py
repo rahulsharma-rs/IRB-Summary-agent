@@ -5,11 +5,10 @@ import asyncio
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 from openai import OpenAI
 from config import Config
-from services.embedder import embed_texts, embed_single
-
-client = OpenAI(api_key=Config.OPENAI_API_KEY)
+from services.embedder import embed_texts, embed_single, get_openai_client
 
 # Field-specific extraction prompts - IMPROVED VERSION
 FIELD_PROMPTS = {
@@ -210,29 +209,51 @@ def find_relevant_sections(full_text: str,
                            keywords: List[str],
                            context_chars: int = 3000,
                            pages_text: Optional[List[Tuple[int, str]]] = None,
-                           field_name: Optional[str] = None) -> str:
+                           field_name: Optional[str] = None,
+                           chunk_texts: Optional[List[str]] = None,
+                           chunk_embeddings=None,
+                           top_chunks: int = 5) -> str:
     """
     Build context for extraction.
-    Prefer semantic retrieval over pages (top 50% most similar),
-    fall back to keyword-density window on the full text.
+    Prefer semantic retrieval over precomputed chunk embeddings if available,
+    then semantic over pages, then keyword-density window.
     """
+    query_text = (field_name or '') + " " + " ".join(keywords)
+
+    # 1) Use stored chunk embeddings if provided
+    if chunk_texts and chunk_embeddings is not None:
+        try:
+            query_embedding = embed_single(query_text.strip() or "irb metadata")
+            scores = []
+            for idx, emb in enumerate(chunk_embeddings):
+                emb_vec = np.asarray(emb, dtype=np.float32)
+                scores.append((idx, float(np.dot(emb_vec, query_embedding))))
+            if scores:
+                scores.sort(key=lambda x: -x[1])
+                top_k = min(top_chunks, len(scores))
+                top_indices = [idx for idx, _ in scores[:top_k]]
+                selected = "\n\n".join(chunk_texts[i] for i in top_indices if i < len(chunk_texts))
+                if selected:
+                    return selected[:context_chars]
+        except Exception:
+            pass
+
+    # 2) Try semantic retrieval over pages if available
     # Try semantic retrieval over pages if available
     if pages_text:
         try:
             page_texts = [txt for _, txt in pages_text if txt and txt.strip()]
             if page_texts:
                 page_embeddings = embed_texts(page_texts)
-                query_text = (field_name or '') + " " + " ".join(keywords)
                 query_embedding = embed_single(query_text.strip() or "irb metadata")
 
                 scores = []
                 for idx, emb in enumerate(page_embeddings):
-                    scores.append((idx, float(emb @ query_embedding)))
+                    scores.append((idx, float(np.dot(emb, query_embedding))))
 
                 if scores:
-                    # Take top 50% of pages by similarity (at least 1)
                     scores.sort(key=lambda x: -x[1])
-                    top_k = max(1, len(scores) // 2)
+                    top_k = min(top_chunks, len(scores))
                     top_indices = [idx for idx, _ in scores[:top_k]]
                     selected = "\n\n".join(page_texts[i] for i in top_indices)
                     if selected:
@@ -323,7 +344,9 @@ def find_page_references(extracted_value: str, pages_text: List[Tuple[int, str]]
 
 
 def extract_single_field(field_name: str, document_text: str, model: str = None,
-                         pages_text: List[Tuple[int, str]] = None) -> Dict:
+                         pages_text: List[Tuple[int, str]] = None,
+                         chunk_texts: Optional[List[str]] = None,
+                         chunk_embeddings=None) -> Dict:
     """
     Extract a single field from the document using a focused prompt.
 
@@ -355,7 +378,9 @@ def extract_single_field(field_name: str, document_text: str, model: str = None,
         document_text,
         prompt_config['search_keywords'],
         pages_text=pages_text,
-        field_name=field_name
+        field_name=field_name,
+        chunk_texts=chunk_texts,
+        chunk_embeddings=chunk_embeddings
     )
 
     user_prompt = prompt_config['user_template'].format(text=relevant_text)
@@ -374,17 +399,13 @@ def extract_single_field(field_name: str, document_text: str, model: str = None,
         # Handle different parameter names based on model
         model_lower = model.lower()
 
-        # GPT-5 and reasoning models have restrictions
+        # GPT-5 / o1 / o3: keep parameters minimal (no temp/max tokens)
         is_restricted_model = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
-
-        if is_restricted_model:
-            # New models: use max_completion_tokens, no temperature
-            api_params['max_completion_tokens'] = prompt_config['max_tokens']
-        else:
-            # Older models: use max_tokens and temperature
+        if not is_restricted_model:
             api_params['max_tokens'] = prompt_config['max_tokens']
             api_params['temperature'] = 0.1
 
+        client = get_openai_client()
         response = client.chat.completions.create(**api_params)
 
         raw_response = response.choices[0].message.content.strip()
@@ -435,7 +456,9 @@ def extract_single_field(field_name: str, document_text: str, model: str = None,
 
 
 def extract_metadata_parallel(document_text: str, model: str = None, max_workers: int = 5,
-                              pages_text: List[Tuple[int, str]] = None) -> dict:
+                              pages_text: List[Tuple[int, str]] = None,
+                              chunk_texts: Optional[List[str]] = None,
+                              chunk_embeddings=None) -> dict:
     """
     Extract all metadata fields in parallel using ThreadPoolExecutor.
 
@@ -468,7 +491,15 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all extraction tasks
         future_to_field = {
-            executor.submit(extract_single_field, field, document_text, model, pages_text): field
+            executor.submit(
+                extract_single_field,
+                field,
+                document_text,
+                model,
+                pages_text,
+                chunk_texts,
+                chunk_embeddings
+            ): field
             for field in fields_to_extract
         }
 
@@ -506,7 +537,9 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
     return normalized
 
 
-def extract_metadata(document_text: str, model: str = None, pages_text: List[Tuple[int, str]] = None) -> dict:
+def extract_metadata(document_text: str, model: str = None, pages_text: List[Tuple[int, str]] = None,
+                     chunk_texts: Optional[List[str]] = None,
+                     chunk_embeddings=None) -> dict:
     """
     Legacy function - now calls extract_metadata_parallel.
     Kept for backward compatibility.
@@ -516,7 +549,13 @@ def extract_metadata(document_text: str, model: str = None, pages_text: List[Tup
         model: Model to use
         pages_text: List of (page_number, text) tuples for page references
     """
-    return extract_metadata_parallel(document_text, model, pages_text=pages_text)
+    return extract_metadata_parallel(
+        document_text,
+        model,
+        pages_text=pages_text,
+        chunk_texts=chunk_texts,
+        chunk_embeddings=chunk_embeddings
+    )
 
 
 def normalize_metadata(metadata: dict) -> dict:

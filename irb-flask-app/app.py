@@ -65,10 +65,25 @@ def upload_file():
         pages = extract_pages(file.filename, file_bytes)
         full_text = get_full_text(pages)
 
+        # Chunk and embed early so extraction can use stored embeddings
+        chunks = chunk_text(pages,
+                            max_chars=Config.CHUNK_SIZE,
+                            overlap=Config.CHUNK_OVERLAP)
+        chunk_embeddings = None
+        chunk_texts = []
+        if chunks:
+            chunk_texts = [c['text'] for c in chunks]
+            chunk_embeddings = embed_texts(chunk_texts)
+
         # Extract metadata using parallel extraction WITH page tracking
         try:
             print(f"[EXTRACTION] Starting parallel extraction for {file.filename}")
-            metadata = extract_metadata(full_text, pages_text=pages)
+            metadata = extract_metadata(
+                full_text,
+                pages_text=pages,
+                chunk_texts=chunk_texts if chunk_texts else None,
+                chunk_embeddings=chunk_embeddings
+            )
             exp_date = metadata.get('expiration_date')
             if isinstance(exp_date, str):
                 metadata['expiration_date'] = parse_date(exp_date)
@@ -119,18 +134,9 @@ def upload_file():
         db.session.add(doc)
         db.session.flush()  # Get document ID
 
-        # Chunk and embed
-        chunks = chunk_text(pages,
-                            max_chars=Config.CHUNK_SIZE,
-                            overlap=Config.CHUNK_OVERLAP)
-
+        # Store chunks with precomputed embeddings
         if chunks:
-            # Generate embeddings
-            chunk_texts = [c['text'] for c in chunks]
-            embeddings = embed_texts(chunk_texts)
-
-            # Store chunks with embeddings
-            for chunk_data, embedding in zip(chunks, embeddings):
+            for chunk_data, embedding in zip(chunks, chunk_embeddings):
                 chunk = DocumentChunk(
                     document_id=doc.id,
                     page_number=chunk_data['page_number'],
@@ -233,9 +239,13 @@ def query_document(doc_id):
 
         context = "\n\n".join([f"(Page {b['page']}) {b['text']}" for b in context_blocks])
 
-        response = client.chat.completions.create(
-            model=Config.OPENAI_MODEL,
-            messages=[
+        model_name = Config.OPENAI_MODEL
+        model_lower = model_name.lower()
+        is_restricted_model = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
+
+        chat_params = {
+            "model": model_name,
+            "messages": [
                 {
                     "role": "system",
                     "content": "You are an IRB protocol analysis assistant. Answer questions based only on the provided context. Cite page numbers in your answer."
@@ -244,9 +254,14 @@ def query_document(doc_id):
                     "role": "user",
                     "content": f"Question: {question}\n\nContext:\n{context}"
                 }
-            ],
-            temperature=0.2
-        )
+            ]
+        }
+
+        if not is_restricted_model:
+            chat_params["max_tokens"] = 400
+            chat_params["temperature"] = 0.2
+
+        response = client.chat.completions.create(**chat_params)
 
         answer = response.choices[0].message.content
 
@@ -361,9 +376,24 @@ def re_extract_metadata(doc_id):
         if not document_text:
             return jsonify({'error': 'No text available for this document'}), 400
 
+        # Prepare chunk data with stored embeddings
+        chunk_texts = []
+        chunk_embeddings = []
+        for chunk in chunks:
+            emb = chunk.get_embedding()
+            if emb is None:
+                continue
+            chunk_texts.append(chunk.text)
+            chunk_embeddings.append(emb)
+
         # Re-extract metadata with page tracking
         print(f"[RE-EXTRACTION] Starting for document {doc_id}")
-        metadata = extract_metadata(document_text, pages_text=pages)
+        metadata = extract_metadata(
+            document_text,
+            pages_text=pages,
+            chunk_texts=chunk_texts if chunk_texts else None,
+            chunk_embeddings=chunk_embeddings if chunk_embeddings else None
+        )
 
         summary = metadata.pop('_extraction_summary', {})
         page_refs = metadata.pop('_page_references', {})
