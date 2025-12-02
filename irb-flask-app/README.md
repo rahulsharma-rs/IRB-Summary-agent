@@ -3,8 +3,9 @@
 Quick start to run the app locally.
 
 1) Clone and enter the project  
-`git clone <repo> && cd irb-flask-app`
+`git clone `
 
+    `cd irb-flask-app`
 2) Create and activate a virtual environment  
 `python3 -m venv venv`  
 `source venv/bin/activate`  (Windows: `venv\Scripts\activate`)
