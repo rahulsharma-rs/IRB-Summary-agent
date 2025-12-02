@@ -65,13 +65,14 @@ def upload_file():
         pages = extract_pages(file.filename, file_bytes)
         full_text = get_full_text(pages)
 
-        # Extract metadata using parallel extraction
+        # Extract metadata using parallel extraction WITH page tracking
         try:
             print(f"[EXTRACTION] Starting parallel extraction for {file.filename}")
-            metadata = extract_metadata(full_text)
+            metadata = extract_metadata(full_text, pages_text=pages)
 
             # Check extraction summary
             summary = metadata.pop('_extraction_summary', {})
+            page_refs = metadata.pop('_page_references', {})
             successful = summary.get('successful', 0)
             failed = summary.get('failed', 0)
 
@@ -91,6 +92,7 @@ def upload_file():
         except Exception as e:
             print(f"[EXTRACTION] Fatal error: {str(e)}")
             metadata = {}
+            page_refs = {}
             extraction_status = 'failed'
             extraction_error = str(e)
 
@@ -104,6 +106,12 @@ def upload_file():
             extraction_error=extraction_error,
             **metadata
         )
+
+        # Store page references
+        for field_name, page_list in page_refs.items():
+            if page_list:
+                pages_str = ','.join(str(p) for p in page_list)
+                setattr(doc, f"{field_name}_pages", pages_str)
 
         db.session.add(doc)
         db.session.flush()  # Get document ID
@@ -329,24 +337,41 @@ def re_extract_metadata(doc_id):
     doc = Document.query.get_or_404(doc_id)
 
     try:
-        # Get document text
-        chunks = doc.chunks.order_by(DocumentChunk.chunk_index).all()
-        document_text = "\n\n".join([chunk.text for chunk in chunks])
+        # Get document chunks to reconstruct pages
+        chunks = doc.chunks.order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
+
+        # Reconstruct pages from chunks
+        pages_dict = {}
+        for chunk in chunks:
+            if chunk.page_number not in pages_dict:
+                pages_dict[chunk.page_number] = []
+            pages_dict[chunk.page_number].append(chunk.text)
+
+        pages = [(page_num, '\n'.join(texts)) for page_num, texts in sorted(pages_dict.items())]
+        document_text = '\n\n'.join([text for _, text in pages])
 
         if not document_text:
             return jsonify({'error': 'No text available for this document'}), 400
 
-        # Re-extract metadata
+        # Re-extract metadata with page tracking
         print(f"[RE-EXTRACTION] Starting for document {doc_id}")
-        metadata = extract_metadata(document_text)
+        metadata = extract_metadata(document_text, pages_text=pages)
 
         summary = metadata.pop('_extraction_summary', {})
+        page_refs = metadata.pop('_page_references', {})
         successful = summary.get('successful', 0)
 
         # Update document fields
         for key, value in metadata.items():
             if hasattr(doc, key):
                 setattr(doc, key, value)
+
+        # Update page references
+        for field_name, page_list in page_refs.items():
+            pages_field = f"{field_name}_pages"
+            if hasattr(doc, pages_field):
+                pages_str = ','.join(str(p) for p in page_list) if page_list else None
+                setattr(doc, pages_field, pages_str)
 
         # Update extraction status
         if successful >= 5:
@@ -361,6 +386,65 @@ def re_extract_metadata(doc_id):
         return jsonify({
             'message': 'Re-extraction completed',
             'extraction_summary': summary,
+            'document': doc.to_dict()
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/update-metadata/<int:doc_id>', methods=['PUT'])
+def update_metadata(doc_id):
+    """
+    Update document metadata fields manually.
+    Allows users to edit extracted values.
+
+    PUT /api/update-metadata/<doc_id>
+    Body: {
+        "irb_number": "new value",
+        "principal_investigator": "new value",
+        ...
+    }
+
+    Returns: Updated document
+    """
+    doc = Document.query.get_or_404(doc_id)
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    # Allowed fields to update
+    allowed_fields = [
+        'irb_number', 'principal_investigator', 'study_title',
+        'study_purpose', 'inclusion_criteria', 'exclusion_criteria',
+        'data_elements', 'funding_source', 'protocol_status', 'expiration_date'
+    ]
+
+    updated_fields = []
+
+    try:
+        for field, value in data.items():
+            if field in allowed_fields and hasattr(doc, field):
+                # Clean the value
+                if value == '' or value == 'Not specified':
+                    value = None
+                elif isinstance(value, str):
+                    value = value.strip() or None
+
+                setattr(doc, field, value)
+                updated_fields.append(field)
+
+        # Mark as manually edited
+        doc.manually_edited = True
+        doc.last_edited_date = datetime.utcnow()
+
+        db.session.commit()
+
+        return jsonify({
+            'message': f'Updated {len(updated_fields)} fields',
+            'updated_fields': updated_fields,
             'document': doc.to_dict()
         })
 

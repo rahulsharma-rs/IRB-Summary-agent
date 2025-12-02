@@ -9,63 +9,160 @@
         <span class="status-badge status-{{ document.protocol_status or 'unknown' }}">
             {{ document.protocol_status or 'Unknown' }}
         </span>
+        {% if document.manually_edited %}
+        <span class="edited-badge">✏️ Manually Edited</span>
+        {% endif %}
         {% if document.extraction_status in ['failed', 'partial'] %}
         <button id="re-extract-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
             🔄 Re-extract Metadata
         </button>
         {% endif %}
+        <button id="edit-mode-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
+            ✏️ Edit Metadata
+        </button>
     </div>
 </div>
 
 <div class="document-layout">
     <!-- Metadata Panel -->
     <div class="metadata-panel">
-        <h3>Document Metadata</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+            <h3>Document Metadata</h3>
+            <div id="edit-controls" style="display: none;">
+                <button id="save-btn" class="btn btn-primary" style="font-size: 0.875rem; padding: 0.5rem 1rem; margin-right: 0.5rem;">
+                    💾 Save Changes
+                </button>
+                <button id="cancel-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
+                    ❌ Cancel
+                </button>
+            </div>
+        </div>
 
         <div class="metadata-grid">
             <div class="metadata-item">
                 <label>IRB Number</label>
-                <value>{{ document.irb_number or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.irb_number or 'Not specified' }}
+                    {% if document.irb_number_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.irb_number_pages }}</span>
+                    {% endif %}
+                </value>
+                <input type="text" class="edit-mode metadata-input" data-field="irb_number"
+                       value="{{ document.irb_number or '' }}" style="display: none;">
             </div>
 
             <div class="metadata-item">
                 <label>Principal Investigator</label>
-                <value>{{ document.principal_investigator or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.principal_investigator or 'Not specified' }}
+                    {% if document.principal_investigator_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.principal_investigator_pages }}</span>
+                    {% endif %}
+                </value>
+                <input type="text" class="edit-mode metadata-input" data-field="principal_investigator"
+                       value="{{ document.principal_investigator or '' }}" style="display: none;">
             </div>
 
             <div class="metadata-item">
                 <label>Protocol Status</label>
-                <value>{{ document.protocol_status or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.protocol_status or 'Not specified' }}
+                    {% if document.protocol_status_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.protocol_status_pages }}</span>
+                    {% endif %}
+                </value>
+                <select class="edit-mode metadata-input" data-field="protocol_status" style="display: none;">
+                    <option value="">Not specified</option>
+                    <option value="approved" {% if document.protocol_status == 'approved' %}selected{% endif %}>Approved</option>
+                    <option value="pending" {% if document.protocol_status == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="expired" {% if document.protocol_status == 'expired' %}selected{% endif %}>Expired</option>
+                    <option value="exempt" {% if document.protocol_status == 'exempt' %}selected{% endif %}>Exempt</option>
+                    <option value="withdrawn" {% if document.protocol_status == 'withdrawn' %}selected{% endif %}>Withdrawn</option>
+                </select>
             </div>
 
             <div class="metadata-item">
                 <label>Expiration Date</label>
-                <value>{{ document.expiration_date or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.expiration_date or 'Not specified' }}
+                    {% if document.expiration_date_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.expiration_date_pages }}</span>
+                    {% endif %}
+                </value>
+                <input type="date" class="edit-mode metadata-input" data-field="expiration_date"
+                       value="{{ document.expiration_date or '' }}" style="display: none;">
+            </div>
+
+            <div class="metadata-item full-width">
+                <label>Study Title</label>
+                <value class="view-mode">
+                    {{ document.study_title or 'Not specified' }}
+                    {% if document.study_title_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.study_title_pages }}</span>
+                    {% endif %}
+                </value>
+                <input type="text" class="edit-mode metadata-input" data-field="study_title"
+                       value="{{ document.study_title or '' }}" style="display: none;">
             </div>
 
             <div class="metadata-item full-width">
                 <label>Study Purpose</label>
-                <value>{{ document.study_purpose or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.study_purpose or 'Not specified' }}
+                    {% if document.study_purpose_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.study_purpose_pages }}</span>
+                    {% endif %}
+                </value>
+                <textarea class="edit-mode metadata-input" data-field="study_purpose"
+                          rows="3" style="display: none;">{{ document.study_purpose or '' }}</textarea>
             </div>
 
             <div class="metadata-item full-width">
                 <label>Inclusion Criteria</label>
-                <value>{{ document.inclusion_criteria or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.inclusion_criteria or 'Not specified' }}
+                    {% if document.inclusion_criteria_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.inclusion_criteria_pages }}</span>
+                    {% endif %}
+                </value>
+                <textarea class="edit-mode metadata-input" data-field="inclusion_criteria"
+                          rows="4" style="display: none;">{{ document.inclusion_criteria or '' }}</textarea>
             </div>
 
             <div class="metadata-item full-width">
                 <label>Exclusion Criteria</label>
-                <value>{{ document.exclusion_criteria or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.exclusion_criteria or 'Not specified' }}
+                    {% if document.exclusion_criteria_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.exclusion_criteria_pages }}</span>
+                    {% endif %}
+                </value>
+                <textarea class="edit-mode metadata-input" data-field="exclusion_criteria"
+                          rows="4" style="display: none;">{{ document.exclusion_criteria or '' }}</textarea>
             </div>
 
             <div class="metadata-item full-width">
                 <label>Approved Data Elements</label>
-                <value>{{ document.data_elements or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.data_elements or 'Not specified' }}
+                    {% if document.data_elements_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.data_elements_pages }}</span>
+                    {% endif %}
+                </value>
+                <textarea class="edit-mode metadata-input" data-field="data_elements"
+                          rows="3" style="display: none;">{{ document.data_elements or '' }}</textarea>
             </div>
 
             <div class="metadata-item">
                 <label>Funding Source</label>
-                <value>{{ document.funding_source or 'Not specified' }}</value>
+                <value class="view-mode">
+                    {{ document.funding_source or 'Not specified' }}
+                    {% if document.funding_source_pages %}
+                    <span class="page-ref">📄 Pages: {{ document.funding_source_pages }}</span>
+                    {% endif %}
+                </value>
+                <input type="text" class="edit-mode metadata-input" data-field="funding_source"
+                       value="{{ document.funding_source or '' }}" style="display: none;">
             </div>
 
             <div class="metadata-item">
@@ -122,6 +219,80 @@ const statusDiv = document.getElementById('query-status');
 const answerSection = document.getElementById('answer-section');
 const answerContent = document.getElementById('answer-content');
 const contextContent = document.getElementById('context-content');
+
+// Edit mode functionality
+const editModeBtn = document.getElementById('edit-mode-btn');
+const editControls = document.getElementById('edit-controls');
+const saveBtn = document.getElementById('save-btn');
+const cancelBtn = document.getElementById('cancel-btn');
+let isEditMode = false;
+
+editModeBtn.addEventListener('click', () => {
+    isEditMode = true;
+    toggleEditMode(true);
+});
+
+cancelBtn.addEventListener('click', () => {
+    if (confirm('Discard changes?')) {
+        isEditMode = false;
+        toggleEditMode(false);
+        location.reload();
+    }
+});
+
+saveBtn.addEventListener('click', async () => {
+    if (!confirm('Save all changes?')) return;
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = '⏳ Saving...';
+
+    // Collect all values
+    const updates = {};
+    document.querySelectorAll('.metadata-input').forEach(input => {
+        const field = input.dataset.field;
+        let value = input.value.trim();
+        if (value === '' || value === 'Not specified') {
+            value = null;
+        }
+        updates[field] = value;
+    });
+
+    try {
+        const response = await fetch('/api/update-metadata/{{ document.id }}', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(updates)
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            alert(`Successfully updated ${data.updated_fields.length} fields!`);
+            location.reload();
+        } else {
+            alert('Error: ' + data.error);
+            saveBtn.disabled = false;
+            saveBtn.textContent = '💾 Save Changes';
+        }
+    } catch (error) {
+        alert('Network error: ' + error.message);
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Save Changes';
+    }
+});
+
+function toggleEditMode(enable) {
+    document.querySelectorAll('.view-mode').forEach(el => {
+        el.style.display = enable ? 'none' : 'block';
+    });
+    document.querySelectorAll('.edit-mode').forEach(el => {
+        el.style.display = enable ? 'block' : 'none';
+    });
+    editControls.style.display = enable ? 'block' : 'none';
+    editModeBtn.style.display = enable ? 'none' : 'inline-block';
+}
 
 // Re-extraction handler
 const reExtractBtn = document.getElementById('re-extract-btn');

@@ -2,198 +2,269 @@ import json
 import re
 import asyncio
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from config import Config
 
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
-# Field-specific extraction prompts
+# Field-specific extraction prompts - IMPROVED VERSION
 FIELD_PROMPTS = {
     "irb_number": {
-        "system": "You are an expert at identifying IRB protocol numbers in regulatory documents.",
-        "user_template": """Find the IRB protocol number in this document text.
+        "system": "You are an expert at identifying IRB protocol numbers. Extract ONLY the official IRB protocol identifier.",
+        "user_template": """Find the IRB protocol number in this document.
 
-IRB numbers typically look like:
-- IRB-2024-001
-- Protocol #12345
-- IRB20240001
-- 2024-IRB-123
+IMPORTANT: Look for the OFFICIAL IRB protocol identifier, typically in one of these formats:
+- IRB-YYYYNNNNN (e.g., IRB-300006637)
+- IRB YYYYNNNNN
+- Protocol #NNNNN
+- IRB#NNNNN
+
+Common locations:
+- Header or footer of pages
+- "IRB Protocol Number:" field
+- "ePortfolio" or "IRB ePortfolio" sections
+- Protocol approval stamps
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"irb_number": "the protocol number"}}
+RULES:
+1. Extract the EXACT protocol number as written
+2. Include all digits and formatting (dashes, spaces)
+3. If multiple numbers appear, choose the one labeled as "IRB Protocol Number" or "IRB Number"
+4. Do NOT include version numbers or amendment numbers
 
-If not found, return: {{"irb_number": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"irb_number": "IRB-300006637"}}
+
+If no IRB number found: {{"irb_number": null}}""",
         "max_tokens": 150,
-        "search_keywords": ["irb", "protocol number", "protocol #", "protocol id"]
+        "search_keywords": ["irb", "protocol", "eportfolio", "protocol number", "irb number", "irb#"]
     },
 
     "principal_investigator": {
-        "system": "You are an expert at identifying Principal Investigators in research documents.",
-        "user_template": """Find the Principal Investigator(s) name(s) in this document.
+        "system": "You are an expert at identifying Principal Investigators. Extract the PI's full name exactly as written.",
+        "user_template": """Find the Principal Investigator (PI) name in this document.
 
-Look for labels like:
-- Principal Investigator
-- PI:
-- Lead Investigator
-- Study Director
+Look for these exact labels:
+- "Principal Investigator:"
+- "PI:"
+- "Lead Investigator:"
+- "Primary Investigator:"
+
+Common locations:
+- Top of first page
+- Investigator section
+- Signature blocks
+- Contact information section
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"principal_investigator": "Full Name(s)"}}
+RULES:
+1. Extract the COMPLETE name including titles (Dr., MD, PhD, etc.)
+2. If multiple investigators listed, extract the PRIMARY or PRINCIPAL investigator only
+3. Format: "Dr. FirstName LastName" or "FirstName LastName, Credentials"
+4. Do NOT include email, phone, or department
 
-If multiple PIs, separate with semicolons.
-If not found, return: {{"principal_investigator": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"principal_investigator": "Dr. Jane Smith, MD"}}
+
+If not found: {{"principal_investigator": null}}""",
         "max_tokens": 200,
-        "search_keywords": ["principal investigator", "pi:", "lead investigator", "study director"]
+        "search_keywords": ["principal investigator", "pi:", "lead investigator", "investigator:", "study director"]
     },
 
     "study_title": {
-        "system": "You are an expert at identifying study titles in research protocols.",
-        "user_template": """Find the official study title in this document.
+        "system": "You are an expert at identifying official study titles. Extract the complete, formal study title.",
+        "user_template": """Find the OFFICIAL study title in this document.
 
-Look for labels like:
-- Study Title
-- Project Title
-- Title:
-- Research Title
+Look for these labels:
+- "Study Title:"
+- "Project Title:"
+- "Research Title:"
+- "Protocol Title:"
+- "Title:"
+
+Common locations:
+- First page, near top
+- After IRB number
+- In "Study Information" section
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"study_title": "The full official study title"}}
+RULES:
+1. Extract the FULL official title (may be long)
+2. Do NOT truncate or summarize
+3. Include all subtitles or phases if present
+4. Remove any surrounding quotes or formatting
+5. This is the title that appears on IRB approval documents
 
-If not found, return: {{"study_title": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"study_title": "Complete Study Title Here"}}
+
+If not found: {{"study_title": null}}""",
         "max_tokens": 300,
-        "search_keywords": ["study title", "project title", "title:", "research title"]
+        "search_keywords": ["study title", "project title", "protocol title", "title:", "research title"]
     },
 
     "study_purpose": {
-        "system": "You are an expert at summarizing research study purposes and objectives.",
-        "user_template": """Summarize the study purpose/objectives in 1-2 sentences.
+        "system": "You are an expert at summarizing research purposes. Create a clear 1-2 sentence summary.",
+        "user_template": """Summarize the study purpose or objectives in 1-2 clear sentences.
 
-Look for sections like:
-- Purpose
-- Objectives
-- Background
-- Study Aims
-- Research Question
+Look for sections labeled:
+- "Purpose"
+- "Objectives"
+- "Study Aims"
+- "Research Question"
+- "Background"
+- "Rationale"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"study_purpose": "1-2 sentence summary"}}
+RULES:
+1. Write in YOUR OWN WORDS - do not copy verbatim
+2. Keep it to 1-2 sentences maximum
+3. Focus on: What is being studied and why?
+4. Make it understandable to non-experts
+5. Example: "This study aims to evaluate the effectiveness of X in treating Y among Z population."
 
-If not found, return: {{"study_purpose": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"study_purpose": "Brief 1-2 sentence summary here"}}
+
+If not found: {{"study_purpose": null}}""",
         "max_tokens": 400,
-        "search_keywords": ["purpose", "objective", "aims", "background", "research question"]
+        "search_keywords": ["purpose", "objective", "aims", "background", "research question", "rationale",
+                            "hypothesis"]
     },
 
     "inclusion_criteria": {
-        "system": "You are an expert at identifying inclusion criteria in clinical protocols.",
-        "user_template": """Extract the key inclusion criteria for study participants.
+        "system": "You are an expert at extracting inclusion criteria. List the key eligibility requirements.",
+        "user_template": """Extract the KEY inclusion criteria (who CAN participate).
 
-Look for sections like:
-- Inclusion Criteria
-- Eligibility Criteria
-- Subject Selection
+Look for section labeled:
+- "Inclusion Criteria"
+- "Eligibility Criteria"
+- "Subject Selection Criteria"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"inclusion_criteria": "Brief bullet-point list or concise summary"}}
+RULES:
+1. List ONLY the major inclusion criteria (3-5 most important)
+2. Use bullet points format
+3. Be concise but complete
+4. Example format:
+   • Age 18-65 years
+   • Diagnosed with condition X
+   • Able to provide consent
 
-Keep it under 200 words.
-If not found, return: {{"inclusion_criteria": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"inclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}}
+
+If not found: {{"inclusion_criteria": null}}""",
         "max_tokens": 500,
-        "search_keywords": ["inclusion criteria", "eligibility", "subject selection", "eligible"]
+        "search_keywords": ["inclusion criteria", "eligibility", "eligible", "subject selection",
+                            "participant criteria"]
     },
 
     "exclusion_criteria": {
-        "system": "You are an expert at identifying exclusion criteria in clinical protocols.",
-        "user_template": """Extract the key exclusion criteria for study participants.
+        "system": "You are an expert at extracting exclusion criteria. List the key disqualifying factors.",
+        "user_template": """Extract the KEY exclusion criteria (who CANNOT participate).
 
-Look for sections like:
-- Exclusion Criteria
-- Ineligibility Criteria
+Look for section labeled:
+- "Exclusion Criteria"
+- "Ineligibility Criteria"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"exclusion_criteria": "Brief bullet-point list or concise summary"}}
+RULES:
+1. List ONLY the major exclusion criteria (3-5 most important)
+2. Use bullet points format
+3. Be concise but complete
+4. Example format:
+   • Pregnant or breastfeeding
+   • History of condition Y
+   • Unable to provide consent
 
-Keep it under 200 words.
-If not found, return: {{"exclusion_criteria": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"exclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}}
+
+If not found: {{"exclusion_criteria": null}}""",
         "max_tokens": 500,
-        "search_keywords": ["exclusion criteria", "ineligibility", "not eligible", "cannot participate"]
+        "search_keywords": ["exclusion criteria", "ineligibility", "not eligible", "cannot participate", "exclusions"]
     },
 
     "data_elements": {
-        "system": "You are an expert at identifying approved data elements in IRB protocols.",
-        "user_template": """Find what data elements, identifiers, or date ranges are approved for this study.
+        "system": "You are an expert at identifying approved data elements and PHI identifiers.",
+        "user_template": """Find what data elements, identifiers, or PHI are approved for collection/use.
 
 Look for sections like:
-- Data Elements
-- Data Collection
-- PHI/Identifiers
-- Data Requested
-- Date Range
+- "Data Elements"
+- "Data to be Collected"
+- "PHI Requested"
+- "Identifiers"
+- "Data Requested"
+- "Variables"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"data_elements": "List of approved data elements, identifiers, date ranges"}}
+RULES:
+1. List specific data elements if enumerated
+2. Include any date ranges mentioned
+3. Include any identifiers (names, MRNs, dates, etc.)
+4. Be specific but concise
+5. Example: "Demographics, diagnoses, lab results, treatment dates (2020-2023), patient names and MRNs"
 
-If not found, return: {{"data_elements": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"data_elements": "List of data elements and date ranges"}}
+
+If not found: {{"data_elements": null}}""",
         "max_tokens": 400,
-        "search_keywords": ["data elements", "identifiers", "phi", "data requested", "date range", "data collection"]
+        "search_keywords": ["data elements", "identifiers", "phi", "data requested", "date range", "data collection",
+                            "variables"]
     },
 
     "funding_source": {
-        "system": "You are an expert at identifying funding sources and sponsors in research documents.",
+        "system": "You are an expert at identifying funding sources and sponsors.",
         "user_template": """Find the funding source(s) or sponsor(s) for this study.
 
-Look for sections like:
-- Funding Source
-- Sponsor
-- Grant
-- Financial Support
+Look for sections:
+- "Funding Source"
+- "Sponsor"
+- "Grant Number"
+- "Financial Support"
+- "Funded by"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"funding_source": "Funding sources/sponsors"}}
+RULES:
+1. Extract the organization/entity providing funding
+2. Include grant numbers if mentioned
+3. If "None" or "Unfunded", state that clearly
+4. Example: "National Institutes of Health (NIH Grant R01-123456)"
+5. Example: "Unfunded" or "University internal funding"
 
-If not found, return: {{"funding_source": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"funding_source": "Funding organization or 'Unfunded'"}}
+
+If not found: {{"funding_source": null}}""",
         "max_tokens": 300,
-        "search_keywords": ["funding", "sponsor", "grant", "support", "financial"]
+        "search_keywords": ["funding", "sponsor", "grant", "support", "financial", "funded by", "nih", "contract"]
     },
 
     "protocol_status": {
-        "system": "You are an expert at identifying protocol approval status in IRB documents.",
-        "user_template": """Find the current protocol status.
+        "system": "You are an expert at identifying protocol approval status. Use ONLY the allowed status values.",
+        "user_template": """Find the current protocol approval status.
 
-Valid statuses are ONLY:
+ALLOWED STATUS VALUES (use lowercase):
 - approved
 - pending
 - expired
@@ -203,40 +274,56 @@ Valid statuses are ONLY:
 Look for phrases like:
 - "Status: Approved"
 - "Exempt determination"
-- "Approval expired"
+- "IRB Approval"
+- "Expired"
+- "Pending review"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"protocol_status": "one of: approved, pending, expired, exempt, withdrawn"}}
+RULES:
+1. Return EXACTLY ONE of the allowed values (lowercase)
+2. "Approved" = IRB has approved the protocol
+3. "Exempt" = Determined to be exempt from full review
+4. "Expired" = Previous approval has expired
+5. "Pending" = Awaiting IRB decision
+6. "Withdrawn" = Protocol was withdrawn
 
-Use lowercase. If not found, return: {{"protocol_status": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"protocol_status": "approved"}}
+
+If not found: {{"protocol_status": null}}""",
         "max_tokens": 150,
-        "search_keywords": ["status", "approval", "exempt", "expired", "withdrawn"]
+        "search_keywords": ["status", "approval", "exempt", "expired", "withdrawn", "pending", "determination"]
     },
 
     "expiration_date": {
-        "system": "You are an expert at finding protocol expiration dates in IRB documents.",
-        "user_template": """Find the protocol expiration date or approval end date.
+        "system": "You are an expert at finding protocol expiration or approval dates. Return dates in YYYY-MM-DD format.",
+        "user_template": """Find the protocol expiration date or approval period end date.
 
-Look for phrases like:
-- Expiration Date
-- Approval Period
-- Valid Until
-- Continuing Review Due
+Look for labels:
+- "Expiration Date:"
+- "Approval Expires:"
+- "Valid Until:"
+- "Continuing Review Due:"
+- "Approval Period:"
 
 Document excerpt:
 {text}
 
-Return ONLY a JSON object:
-{{"expiration_date": "YYYY-MM-DD format or descriptive date"}}
+RULES:
+1. Return date in YYYY-MM-DD format (e.g., 2025-12-31)
+2. If only month/year given, use last day of month
+3. If "Approval Period: 1/1/2024 - 12/31/2024", extract the END date
+4. Convert formats: "December 31, 2024" → "2024-12-31"
 
-If not found, return: {{"expiration_date": null}}
-Do not include any other text.""",
+Return ONLY valid JSON:
+{{"expiration_date": "2025-12-31"}}
+
+If not found: {{"expiration_date": null}}""",
         "max_tokens": 150,
-        "search_keywords": ["expiration", "approval date", "valid until", "continuing review", "expires"]
+        "search_keywords": ["expiration", "expires", "approval date", "valid until", "continuing review",
+                            "approval period"]
     }
 }
 
@@ -278,12 +365,70 @@ def find_relevant_sections(full_text: str, keywords: List[str], context_chars: i
     return full_text[best_start:best_start + context_chars]
 
 
-def extract_single_field(field_name: str, document_text: str, model: str = None) -> Dict:
+def find_page_references(extracted_value: str, pages_text: List[Tuple[int, str]],
+                         keywords: List[str]) -> List[int]:
+    """
+    Find which pages contain the extracted value or related keywords.
+
+    Args:
+        extracted_value: The value that was extracted
+        pages_text: List of (page_number, text) tuples
+        keywords: Keywords related to this field
+
+    Returns:
+        List of page numbers where this information was found
+    """
+    if not extracted_value or not pages_text:
+        return []
+
+    page_refs = set()
+    value_lower = str(extracted_value).lower()
+
+    # Split extracted value into meaningful tokens (remove common words)
+    value_tokens = set()
+    for token in re.findall(r'\b\w+\b', value_lower):
+        if len(token) > 3 and token not in {'this', 'that', 'with', 'from', 'have', 'been', 'will'}:
+            value_tokens.add(token)
+
+    for page_num, page_text in pages_text:
+        page_lower = page_text.lower()
+
+        # Check if page contains the exact value (or significant part of it)
+        if len(value_lower) > 10:
+            # For longer values, check if 60% of it appears
+            value_parts = value_lower.split()
+            matches = sum(1 for part in value_parts if len(part) > 3 and part in page_lower)
+            if matches >= len(value_parts) * 0.6:
+                page_refs.add(page_num)
+                continue
+
+        # Check if page contains significant tokens from the value
+        token_matches = sum(1 for token in value_tokens if token in page_lower)
+        if token_matches >= min(3, len(value_tokens) * 0.5):
+            page_refs.add(page_num)
+            continue
+
+        # Check if page contains the field-related keywords
+        keyword_matches = sum(1 for kw in keywords if kw.lower() in page_lower)
+        if keyword_matches >= 2:
+            page_refs.add(page_num)
+
+    return sorted(list(page_refs))
+
+
+def extract_single_field(field_name: str, document_text: str, model: str = None,
+                         pages_text: List[Tuple[int, str]] = None) -> Dict:
     """
     Extract a single field from the document using a focused prompt.
 
+    Args:
+        field_name: Name of the field to extract
+        document_text: Full document text
+        model: Model to use for extraction
+        pages_text: List of (page_number, text) tuples for reference tracking
+
     Returns:
-        dict with 'field_name', 'value', 'status' ('success' or 'failed'), 'error'
+        dict with 'field_name', 'value', 'status', 'error', 'page_references'
     """
     if not model:
         model = Config.OPENAI_MODEL
@@ -292,6 +437,7 @@ def extract_single_field(field_name: str, document_text: str, model: str = None)
         return {
             'field_name': field_name,
             'value': None,
+            'page_references': [],
             'status': 'failed',
             'error': f'Unknown field: {field_name}'
         }
@@ -307,15 +453,30 @@ def extract_single_field(field_name: str, document_text: str, model: str = None)
     user_prompt = prompt_config['user_template'].format(text=relevant_text)
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
+        # Build API call parameters
+        api_params = {
+            'model': model,
+            'messages': [
                 {"role": "system", "content": prompt_config['system']},
                 {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=prompt_config['max_tokens']
-        )
+            ]
+        }
+
+        # Handle different parameter names based on model
+        model_lower = model.lower()
+
+        # GPT-5 and reasoning models have restrictions
+        is_restricted_model = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
+
+        if is_restricted_model:
+            # New models: use max_completion_tokens, no temperature
+            api_params['max_completion_tokens'] = prompt_config['max_tokens']
+        else:
+            # Older models: use max_tokens and temperature
+            api_params['max_tokens'] = prompt_config['max_tokens']
+            api_params['temperature'] = 0.1
+
+        response = client.chat.completions.create(**api_params)
 
         raw_response = response.choices[0].message.content.strip()
 
@@ -333,9 +494,15 @@ def extract_single_field(field_name: str, document_text: str, model: str = None)
             if value.lower() in ['not specified', 'n/a', 'none', 'null', 'not found', '']:
                 value = None
 
+        # Find page references if value was found
+        page_refs = []
+        if value and pages_text:
+            page_refs = find_page_references(value, pages_text, prompt_config['search_keywords'])
+
         return {
             'field_name': field_name,
             'value': value,
+            'page_references': page_refs,
             'status': 'success',
             'error': None
         }
@@ -344,6 +511,7 @@ def extract_single_field(field_name: str, document_text: str, model: str = None)
         return {
             'field_name': field_name,
             'value': None,
+            'page_references': [],
             'status': 'failed',
             'error': f'JSON parse error: {str(e)}'
         }
@@ -351,26 +519,35 @@ def extract_single_field(field_name: str, document_text: str, model: str = None)
         return {
             'field_name': field_name,
             'value': None,
+            'page_references': [],
             'status': 'failed',
             'error': str(e)
         }
 
 
-def extract_metadata_parallel(document_text: str, model: str = None, max_workers: int = 5) -> dict:
+def extract_metadata_parallel(document_text: str, model: str = None, max_workers: int = 5,
+                              pages_text: List[Tuple[int, str]] = None) -> dict:
     """
     Extract all metadata fields in parallel using ThreadPoolExecutor.
 
     This is the NEW recommended approach - extracts each field independently
     with focused prompts, running multiple extractions concurrently.
 
+    Args:
+        document_text: Full document text
+        model: Model to use for extraction
+        max_workers: Number of concurrent API calls
+        pages_text: List of (page_number, text) tuples for reference tracking
+
     Returns:
-        dict with all field values and an extraction_summary
+        dict with all field values, page references, and an extraction_summary
     """
     if not model:
         model = Config.OPENAI_MODEL
 
     fields_to_extract = list(FIELD_PROMPTS.keys())
     results = {}
+    page_references = {}
     extraction_summary = {
         'total_fields': len(fields_to_extract),
         'successful': 0,
@@ -382,7 +559,7 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all extraction tasks
         future_to_field = {
-            executor.submit(extract_single_field, field, document_text, model): field
+            executor.submit(extract_single_field, field, document_text, model, pages_text): field
             for field in fields_to_extract
         }
 
@@ -392,6 +569,7 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
             try:
                 result = future.result()
                 results[result['field_name']] = result['value']
+                page_references[result['field_name']] = result.get('page_references', [])
 
                 if result['status'] == 'success':
                     extraction_summary['successful'] += 1
@@ -404,6 +582,7 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
 
             except Exception as e:
                 results[field] = None
+                page_references[field] = []
                 extraction_summary['failed'] += 1
                 extraction_summary['errors'].append({
                     'field': field,
@@ -413,16 +592,22 @@ def extract_metadata_parallel(document_text: str, model: str = None, max_workers
     # Normalize metadata
     normalized = normalize_metadata(results)
     normalized['_extraction_summary'] = extraction_summary
+    normalized['_page_references'] = page_references
 
     return normalized
 
 
-def extract_metadata(document_text: str, model: str = None) -> dict:
+def extract_metadata(document_text: str, model: str = None, pages_text: List[Tuple[int, str]] = None) -> dict:
     """
     Legacy function - now calls extract_metadata_parallel.
     Kept for backward compatibility.
+
+    Args:
+        document_text: Full document text
+        model: Model to use
+        pages_text: List of (page_number, text) tuples for page references
     """
-    return extract_metadata_parallel(document_text, model)
+    return extract_metadata_parallel(document_text, model, pages_text=pages_text)
 
 
 def normalize_metadata(metadata: dict) -> dict:
