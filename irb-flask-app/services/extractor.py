@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from config import Config
+from services.embedder import embed_texts, embed_single
 
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
@@ -14,130 +15,77 @@ client = OpenAI(api_key=Config.OPENAI_API_KEY)
 FIELD_PROMPTS = {
     "irb_number": {
         "system": "You are an expert at identifying IRB protocol numbers. Extract ONLY the official IRB protocol identifier.",
-        "user_template": """Find the IRB protocol number in this document.
+        "user_template": """Question: What is the IRB protocol number in this document?
 
-IMPORTANT: Look for the OFFICIAL IRB protocol identifier, typically in one of these formats:
-- IRB-YYYYNNNNN (e.g., IRB-300006637)
-- IRB YYYYNNNNN
-- Protocol #NNNNN
-- IRB#NNNNN
-
-Common locations:
-- Header or footer of pages
-- "IRB Protocol Number:" field
-- "ePortfolio" or "IRB ePortfolio" sections
-- Protocol approval stamps
+Look for the official IRB identifier (e.g., IRB-YYYYNNNNN, IRB YYYYNNNNN, IRB#NNNNN, Protocol #NNNNN).
 
 Document excerpt:
 {text}
 
-RULES:
-1. Extract the EXACT protocol number as written
-2. Include all digits and formatting (dashes, spaces)
-3. If multiple numbers appear, choose the one labeled as "IRB Protocol Number" or "IRB Number"
-4. Do NOT include version numbers or amendment numbers
+Rules:
+1) Return the exact protocol number (keep dashes/spaces), the one labeled IRB/IRB protocol.
+2) Do not include version or amendment numbers.
+3) If none, return null.
 
 Return ONLY valid JSON:
-{{"irb_number": "IRB-300006637"}}
-
-If no IRB number found: {{"irb_number": null}}""",
+{{"irb_number": "IRB-300006637"}} or {{"irb_number": null}}""",
         "max_tokens": 150,
         "search_keywords": ["irb", "protocol", "eportfolio", "protocol number", "irb number", "irb#"]
     },
 
     "principal_investigator": {
         "system": "You are an expert at identifying Principal Investigators. Extract the PI's full name exactly as written.",
-        "user_template": """Find the Principal Investigator (PI) name in this document.
+        "user_template": """Question: Who is the Principal Investigator (PI) for this study?
 
-Look for these exact labels:
-- "Principal Investigator:"
-- "PI:"
-- "Lead Investigator:"
-- "Primary Investigator:"
-
-Common locations:
-- Top of first page
-- Investigator section
-- Signature blocks
-- Contact information section
+Look for labels like "Principal Investigator", "PI", "Lead Investigator".
 
 Document excerpt:
 {text}
 
-RULES:
-1. Extract the COMPLETE name including titles (Dr., MD, PhD, etc.)
-2. If multiple investigators listed, extract the PRIMARY or PRINCIPAL investigator only
-3. Format: "Dr. FirstName LastName" or "FirstName LastName, Credentials"
-4. Do NOT include email, phone, or department
+Rules:
+1) Return the full name with titles/credentials if present.
+2) If multiple investigators, choose the principal/primary one.
+3) No contact info.
+4) If none, return null.
 
 Return ONLY valid JSON:
-{{"principal_investigator": "Dr. Jane Smith, MD"}}
-
-If not found: {{"principal_investigator": null}}""",
+{{"principal_investigator": "Dr. Jane Smith, MD"}} or {{"principal_investigator": null}}""",
         "max_tokens": 200,
         "search_keywords": ["principal investigator", "pi:", "lead investigator", "investigator:", "study director"]
     },
 
     "study_title": {
         "system": "You are an expert at identifying official study titles. Extract the complete, formal study title.",
-        "user_template": """Find the OFFICIAL study title in this document.
-
-Look for these labels:
-- "Study Title:"
-- "Project Title:"
-- "Research Title:"
-- "Protocol Title:"
-- "Title:"
-
-Common locations:
-- First page, near top
-- After IRB number
-- In "Study Information" section
+        "user_template": """Question: What is the official study/protocol title?
 
 Document excerpt:
 {text}
 
-RULES:
-1. Extract the FULL official title (may be long)
-2. Do NOT truncate or summarize
-3. Include all subtitles or phases if present
-4. Remove any surrounding quotes or formatting
-5. This is the title that appears on IRB approval documents
+Rules:
+1) Return the full formal title (include subtitles/phases).
+2) Do not summarize or truncate; strip surrounding quotes.
+3) If none, return null.
 
 Return ONLY valid JSON:
-{{"study_title": "Complete Study Title Here"}}
-
-If not found: {{"study_title": null}}""",
+{{"study_title": "Complete Study Title Here"}} or {{"study_title": null}}""",
         "max_tokens": 300,
         "search_keywords": ["study title", "project title", "protocol title", "title:", "research title"]
     },
 
     "study_purpose": {
         "system": "You are an expert at summarizing research purposes. Create a clear 1-2 sentence summary.",
-        "user_template": """Summarize the study purpose or objectives in 1-2 clear sentences.
-
-Look for sections labeled:
-- "Purpose"
-- "Objectives"
-- "Study Aims"
-- "Research Question"
-- "Background"
-- "Rationale"
+        "user_template": """Question: What is the purpose/objective of the study? Answer in 1-2 sentences.
 
 Document excerpt:
 {text}
 
-RULES:
-1. Write in YOUR OWN WORDS - do not copy verbatim
-2. Keep it to 1-2 sentences maximum
-3. Focus on: What is being studied and why?
-4. Make it understandable to non-experts
-5. Example: "This study aims to evaluate the effectiveness of X in treating Y among Z population."
+Rules:
+1) Summarize in your own words (no verbatim copying).
+2) Max 2 sentences; state what is studied and why.
+3) If not found, return null.
 
 Return ONLY valid JSON:
-{{"study_purpose": "Brief 1-2 sentence summary here"}}
-
-If not found: {{"study_purpose": null}}""",
+{{"study_purpose": "Brief 1-2 sentence summary here"}} or {{"study_purpose": null}}""",
         "max_tokens": 400,
         "search_keywords": ["purpose", "objective", "aims", "background", "research question", "rationale",
                             "hypothesis"]
@@ -145,29 +93,18 @@ If not found: {{"study_purpose": null}}""",
 
     "inclusion_criteria": {
         "system": "You are an expert at extracting inclusion criteria. List the key eligibility requirements.",
-        "user_template": """Extract the KEY inclusion criteria (who CAN participate).
-
-Look for section labeled:
-- "Inclusion Criteria"
-- "Eligibility Criteria"
-- "Subject Selection Criteria"
+        "user_template": """Question: What are the inclusion criteria (who CAN participate)?
 
 Document excerpt:
 {text}
 
-RULES:
-1. List ONLY the major inclusion criteria (3-5 most important)
-2. Use bullet points format
-3. Be concise but complete
-4. Example format:
-   • Age 18-65 years
-   • Diagnosed with condition X
-   • Able to provide consent
+Rules:
+1) Return 3-5 key bullets, concise.
+2) Format with bullets using the character • and newline between items.
+3) If none, return null.
 
 Return ONLY valid JSON:
-{{"inclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}}
-
-If not found: {{"inclusion_criteria": null}}""",
+{{"inclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}} or {{"inclusion_criteria": null}}""",
         "max_tokens": 500,
         "search_keywords": ["inclusion criteria", "eligibility", "eligible", "subject selection",
                             "participant criteria"]
@@ -175,58 +112,37 @@ If not found: {{"inclusion_criteria": null}}""",
 
     "exclusion_criteria": {
         "system": "You are an expert at extracting exclusion criteria. List the key disqualifying factors.",
-        "user_template": """Extract the KEY exclusion criteria (who CANNOT participate).
-
-Look for section labeled:
-- "Exclusion Criteria"
-- "Ineligibility Criteria"
+        "user_template": """Question: What are the exclusion criteria (who CANNOT participate)?
 
 Document excerpt:
 {text}
 
-RULES:
-1. List ONLY the major exclusion criteria (3-5 most important)
-2. Use bullet points format
-3. Be concise but complete
-4. Example format:
-   • Pregnant or breastfeeding
-   • History of condition Y
-   • Unable to provide consent
+Rules:
+1) Return 3-5 key bullets, concise.
+2) Format with bullets using the character • and newline between items.
+3) If none, return null.
 
 Return ONLY valid JSON:
-{{"exclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}}
-
-If not found: {{"exclusion_criteria": null}}""",
+{{"exclusion_criteria": "• Criterion 1\\n• Criterion 2\\n• Criterion 3"}} or {{"exclusion_criteria": null}}""",
         "max_tokens": 500,
         "search_keywords": ["exclusion criteria", "ineligibility", "not eligible", "cannot participate", "exclusions"]
     },
 
     "data_elements": {
         "system": "You are an expert at identifying approved data elements and PHI identifiers.",
-        "user_template": """Find what data elements, identifiers, or PHI are approved for collection/use.
-
-Look for sections like:
-- "Data Elements"
-- "Data to be Collected"
-- "PHI Requested"
-- "Identifiers"
-- "Data Requested"
-- "Variables"
+        "user_template": """Question: What data elements/identifiers/PHI are approved for collection or use?
 
 Document excerpt:
 {text}
 
-RULES:
-1. List specific data elements if enumerated
-2. Include any date ranges mentioned
-3. Include any identifiers (names, MRNs, dates, etc.)
-4. Be specific but concise
-5. Example: "Demographics, diagnoses, lab results, treatment dates (2020-2023), patient names and MRNs"
+Rules:
+1) List the specific elements and any date ranges.
+2) Include identifiers if mentioned (names, MRNs, dates, etc.).
+3) Be concise.
+4) If none, return null.
 
 Return ONLY valid JSON:
-{{"data_elements": "List of data elements and date ranges"}}
-
-If not found: {{"data_elements": null}}""",
+{{"data_elements": "Demographics, diagnoses, lab results, treatment dates (2020-2023), patient names and MRNs"}} or {{"data_elements": null}}""",
         "max_tokens": 400,
         "search_keywords": ["data elements", "identifiers", "phi", "data requested", "date range", "data collection",
                             "variables"]
@@ -234,94 +150,55 @@ If not found: {{"data_elements": null}}""",
 
     "funding_source": {
         "system": "You are an expert at identifying funding sources and sponsors.",
-        "user_template": """Find the funding source(s) or sponsor(s) for this study.
-
-Look for sections:
-- "Funding Source"
-- "Sponsor"
-- "Grant Number"
-- "Financial Support"
-- "Funded by"
+        "user_template": """Question: What is the funding source or sponsor?
 
 Document excerpt:
 {text}
 
-RULES:
-1. Extract the organization/entity providing funding
-2. Include grant numbers if mentioned
-3. If "None" or "Unfunded", state that clearly
-4. Example: "National Institutes of Health (NIH Grant R01-123456)"
-5. Example: "Unfunded" or "University internal funding"
+Rules:
+1) Name the organization/entity; include grant numbers if present.
+2) If unfunded/none, say "Unfunded".
+3) If none found, return null.
 
 Return ONLY valid JSON:
-{{"funding_source": "Funding organization or 'Unfunded'"}}
-
-If not found: {{"funding_source": null}}""",
+{{"funding_source": "National Institutes of Health (NIH Grant R01-123456)"}} or {{"funding_source": null}}""",
         "max_tokens": 300,
         "search_keywords": ["funding", "sponsor", "grant", "support", "financial", "funded by", "nih", "contract"]
     },
 
     "protocol_status": {
         "system": "You are an expert at identifying protocol approval status. Use ONLY the allowed status values.",
-        "user_template": """Find the current protocol approval status.
+        "user_template": """Question: What is the current protocol approval status?
 
-ALLOWED STATUS VALUES (use lowercase):
-- approved
-- pending
-- expired
-- exempt
-- withdrawn
-
-Look for phrases like:
-- "Status: Approved"
-- "Exempt determination"
-- "IRB Approval"
-- "Expired"
-- "Pending review"
+Allowed values (lowercase): approved, pending, expired, exempt, withdrawn.
 
 Document excerpt:
 {text}
 
-RULES:
-1. Return EXACTLY ONE of the allowed values (lowercase)
-2. "Approved" = IRB has approved the protocol
-3. "Exempt" = Determined to be exempt from full review
-4. "Expired" = Previous approval has expired
-5. "Pending" = Awaiting IRB decision
-6. "Withdrawn" = Protocol was withdrawn
+Rules:
+1) Return exactly one allowed value.
+2) If none found, return null.
 
 Return ONLY valid JSON:
-{{"protocol_status": "approved"}}
-
-If not found: {{"protocol_status": null}}""",
+{{"protocol_status": "approved"}} or {{"protocol_status": null}}""",
         "max_tokens": 150,
         "search_keywords": ["status", "approval", "exempt", "expired", "withdrawn", "pending", "determination"]
     },
 
     "expiration_date": {
         "system": "You are an expert at finding protocol expiration or approval dates. Return dates in YYYY-MM-DD format.",
-        "user_template": """Find the protocol expiration date or approval period end date.
-
-Look for labels:
-- "Expiration Date:"
-- "Approval Expires:"
-- "Valid Until:"
-- "Continuing Review Due:"
-- "Approval Period:"
+        "user_template": """Question: What is the protocol expiration date or approval end date?
 
 Document excerpt:
 {text}
 
-RULES:
-1. Return date in YYYY-MM-DD format (e.g., 2025-12-31)
-2. If only month/year given, use last day of month
-3. If "Approval Period: 1/1/2024 - 12/31/2024", extract the END date
-4. Convert formats: "December 31, 2024" → "2024-12-31"
+Rules:
+1) Return in YYYY-MM-DD; if only month/year, use last day of that month.
+2) If a range is shown, return the END date.
+3) If none, return null.
 
 Return ONLY valid JSON:
-{{"expiration_date": "2025-12-31"}}
-
-If not found: {{"expiration_date": null}}""",
+{{"expiration_date": "2025-12-31"}} or {{"expiration_date": null}}""",
         "max_tokens": 150,
         "search_keywords": ["expiration", "expires", "approval date", "valid until", "continuing review",
                             "approval period"]
@@ -329,14 +206,44 @@ If not found: {{"expiration_date": null}}""",
 }
 
 
-def find_relevant_sections(full_text: str, keywords: List[str], context_chars: int = 3000) -> str:
+def find_relevant_sections(full_text: str,
+                           keywords: List[str],
+                           context_chars: int = 3000,
+                           pages_text: Optional[List[Tuple[int, str]]] = None,
+                           field_name: Optional[str] = None) -> str:
     """
-    Find sections of text most relevant to the keywords.
-    Returns up to context_chars of the most relevant text.
+    Build context for extraction.
+    Prefer semantic retrieval over pages (top 50% most similar),
+    fall back to keyword-density window on the full text.
     """
+    # Try semantic retrieval over pages if available
+    if pages_text:
+        try:
+            page_texts = [txt for _, txt in pages_text if txt and txt.strip()]
+            if page_texts:
+                page_embeddings = embed_texts(page_texts)
+                query_text = (field_name or '') + " " + " ".join(keywords)
+                query_embedding = embed_single(query_text.strip() or "irb metadata")
+
+                scores = []
+                for idx, emb in enumerate(page_embeddings):
+                    scores.append((idx, float(emb @ query_embedding)))
+
+                if scores:
+                    # Take top 50% of pages by similarity (at least 1)
+                    scores.sort(key=lambda x: -x[1])
+                    top_k = max(1, len(scores) // 2)
+                    top_indices = [idx for idx, _ in scores[:top_k]]
+                    selected = "\n\n".join(page_texts[i] for i in top_indices)
+                    if selected:
+                        return selected[:context_chars]
+        except Exception:
+            # If embedding lookup fails, fall back to keyword method
+            pass
+
+    # Fallback: keyword density search on full text
     text_lower = full_text.lower()
 
-    # Find all keyword positions
     positions = []
     for keyword in keywords:
         idx = 0
@@ -348,10 +255,8 @@ def find_relevant_sections(full_text: str, keywords: List[str], context_chars: i
             idx = pos + 1
 
     if not positions:
-        # No keywords found, return beginning of document
         return full_text[:context_chars]
 
-    # Find the section with most keyword density
     positions.sort()
     best_start = 0
     best_count = 0
@@ -361,7 +266,7 @@ def find_relevant_sections(full_text: str, keywords: List[str], context_chars: i
         count = sum(1 for p in positions if start_pos <= p < end_pos)
         if count > best_count:
             best_count = count
-            best_start = max(0, start_pos - 500)  # Include some context before
+            best_start = max(0, start_pos - 500)
 
     return full_text[best_start:best_start + context_chars]
 
@@ -448,7 +353,9 @@ def extract_single_field(field_name: str, document_text: str, model: str = None,
     # Find relevant sections in document
     relevant_text = find_relevant_sections(
         document_text,
-        prompt_config['search_keywords']
+        prompt_config['search_keywords'],
+        pages_text=pages_text,
+        field_name=field_name
     )
 
     user_prompt = prompt_config['user_template'].format(text=relevant_text)
