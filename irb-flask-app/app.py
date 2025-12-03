@@ -22,8 +22,6 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Set application root for URL generation
 app.config['APPLICATION_ROOT'] = '/irb'
 
-# Fix URL generation for proxy setup
-from flask import _request_ctx_stack
 
 
 @app.url_defaults
