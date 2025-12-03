@@ -84,7 +84,7 @@ form.addEventListener('submit', async (e) => {
     formData.append('file', file);
 
     try {
-        const response = await fetch('/upload', {
+        const response = await fetch("{{ url_for('upload_file') }}", {
             method: 'POST',
             body: formData
         });

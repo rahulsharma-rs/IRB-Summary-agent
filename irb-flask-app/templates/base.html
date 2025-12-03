@@ -43,18 +43,19 @@
 
     <script>
         // Load stats
-        fetch('/api/stats')
-            .then(r => r.json())
-            .then(data => {
-                const html = `
-                    <p><strong>${data.total_documents}</strong> documents</p>
-                    <p><strong>${data.total_chunks}</strong> chunks indexed</p>
-                `;
-                document.getElementById('stats-content').innerHTML = html;
-            })
-            .catch(e => {
-                document.getElementById('stats-content').innerHTML = '<p>Error loading stats</p>';
-            });
+        fetch('{{ url_for("api_stats") }}')
+        .then(r => r.json())
+        .then(data => {
+            const html = `
+                <p><strong>${data.total_documents}</strong> documents</p>
+                <p><strong>${data.total_chunks}</strong> chunks indexed</p>
+            `;
+            document.getElementById('stats-content').innerHTML = html;
+        })
+        .catch(e => {
+            document.getElementById('stats-content').innerHTML = '<p>Error loading stats</p>';
+            console.error('Stats error:', e);
+        });
     </script>
 
     {% block scripts %}{% endblock %}

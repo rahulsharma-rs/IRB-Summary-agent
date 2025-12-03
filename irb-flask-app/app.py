@@ -16,6 +16,24 @@ app = Flask(__name__)
 app.config.from_object(Config)
 Config.init_app(app)
 
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# Set application root for URL generation
+app.config['APPLICATION_ROOT'] = '/irb'
+
+# Fix URL generation for proxy setup
+from flask import _request_ctx_stack
+
+
+@app.url_defaults
+def add_prefix(endpoint, values):
+    if 'static' in endpoint:
+        return
+
+
+@app.url_value_preprocessor
+def pull_prefix(endpoint, values):
+    pass
 # Initialize database
 init_db(app)
 

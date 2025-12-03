@@ -258,7 +258,7 @@ saveBtn.addEventListener('click', async () => {
     });
 
     try {
-        const response = await fetch('/api/update-metadata/{{ document.id }}', {
+        const response = await fetch("{{ url_for('update_metadata', doc_id=document.id) }}", {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
@@ -306,7 +306,7 @@ if (reExtractBtn) {
         reExtractBtn.textContent = '⏳ Re-extracting...';
 
         try {
-            const response = await fetch('/api/re-extract/{{ document.id }}', {
+            const response = await fetch("{{ url_for('re_extract_metadata', doc_id=document.id) }}", {
                 method: 'POST'
             });
 
@@ -345,7 +345,7 @@ queryForm.addEventListener('submit', async (e) => {
     answerSection.style.display = 'none';
 
     try {
-        const response = await fetch('/api/query/{{ document.id }}', {
+        const response = await fetch("{{ url_for('query_document', doc_id=document.id) }}", {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
