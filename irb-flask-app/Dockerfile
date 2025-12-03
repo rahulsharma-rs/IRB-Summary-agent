@@ -26,4 +26,5 @@ RUN mkdir -p /app/uploads
 
 EXPOSE 5000
 
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app", "-w", "2", "--timeout", "120"]
+# Use a single worker for SQLite to avoid concurrent schema creation issues
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app", "-w", "1", "--timeout", "120"]

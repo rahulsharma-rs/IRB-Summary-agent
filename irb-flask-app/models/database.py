@@ -1,6 +1,6 @@
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import Index, text
+from sqlalchemy import Index, text, inspect
 
 db = SQLAlchemy()
 
@@ -125,5 +125,12 @@ def init_db(app):
     """Initialize database"""
     db.init_app(app)
     with app.app_context():
-        db.create_all()
-        print("Database initialized successfully")
+        try:
+            inspector = inspect(db.engine)
+            if not inspector.has_table('documents') or not inspector.has_table('document_chunks'):
+                db.create_all()
+        except Exception as exc:
+            # If tables already exist or another process created them, continue
+            app.logger.warning(f"Database init skipped/failed: {exc}")
+        else:
+            print("Database initialized successfully")
