@@ -1,7 +1,6 @@
 import os
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
-from werkzeug.middleware.proxy_fix import ProxyFix
 from datetime import datetime
 
 from config import Config
@@ -9,30 +8,14 @@ from models.database import db, init_db, Document, DocumentChunk
 from models.document import (
     extract_pages, chunk_text, compute_file_hash, get_full_text
 )
-from services.extractor import extract_metadata, parse_date
+from services.extractor import extract_metadata
 from services.embedder import embed_texts, embed_single, find_similar_chunks
-from services.searcher import search_documents, get_document_stats
+from services.searcher import search_documents, get_document_stats, create_document_search_profile
 
 app = Flask(__name__)
 app.config.from_object(Config)
 Config.init_app(app)
 
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
-# Set application root for URL generation
-app.config['APPLICATION_ROOT'] = '/irb'
-
-
-
-@app.url_defaults
-def add_prefix(endpoint, values):
-    if 'static' in endpoint:
-        return
-
-
-@app.url_value_preprocessor
-def pull_prefix(endpoint, values):
-    pass
 # Initialize database
 init_db(app)
 
@@ -82,28 +65,10 @@ def upload_file():
         pages = extract_pages(file.filename, file_bytes)
         full_text = get_full_text(pages)
 
-        # Chunk and embed early so extraction can use stored embeddings
-        chunks = chunk_text(pages,
-                            max_chars=Config.CHUNK_SIZE,
-                            overlap=Config.CHUNK_OVERLAP)
-        chunk_embeddings = None
-        chunk_texts = []
-        if chunks:
-            chunk_texts = [c['text'] for c in chunks]
-            chunk_embeddings = embed_texts(chunk_texts)
-
         # Extract metadata using parallel extraction WITH page tracking
         try:
             print(f"[EXTRACTION] Starting parallel extraction for {file.filename}")
-            metadata = extract_metadata(
-                full_text,
-                pages_text=pages,
-                chunk_texts=chunk_texts if chunk_texts else None,
-                chunk_embeddings=chunk_embeddings
-            )
-            exp_date = metadata.get('expiration_date')
-            if isinstance(exp_date, str):
-                metadata['expiration_date'] = parse_date(exp_date)
+            metadata = extract_metadata(full_text, pages_text=pages)
 
             # Check extraction summary
             summary = metadata.pop('_extraction_summary', {})
@@ -151,9 +116,18 @@ def upload_file():
         db.session.add(doc)
         db.session.flush()  # Get document ID
 
-        # Store chunks with precomputed embeddings
+        # Chunk and embed
+        chunks = chunk_text(pages,
+                            max_chars=Config.CHUNK_SIZE,
+                            overlap=Config.CHUNK_OVERLAP)
+
         if chunks:
-            for chunk_data, embedding in zip(chunks, chunk_embeddings):
+            # Generate embeddings
+            chunk_texts = [c['text'] for c in chunks]
+            embeddings = embed_texts(chunk_texts)
+
+            # Store chunks with embeddings
+            for chunk_data, embedding in zip(chunks, embeddings):
                 chunk = DocumentChunk(
                     document_id=doc.id,
                     page_number=chunk_data['page_number'],
@@ -164,6 +138,15 @@ def upload_file():
                 db.session.add(chunk)
 
             doc.n_chunks = len(chunks)
+
+        # Document-level embedding for semantic search
+        try:
+            profile_text = create_document_search_profile(doc)
+            if profile_text.strip():
+                doc_embedding = embed_single(profile_text)
+                doc.set_document_embedding(doc_embedding)
+        except Exception as e:
+            print(f"[DOC EMBED] Failed to create document embedding: {e}")
 
         db.session.commit()
 
@@ -185,28 +168,45 @@ def search():
     irb_number = request.args.get('irb', '')
     pi_name = request.args.get('pi', '')
     status = request.args.get('status', '')
+    search_mode = request.args.get('mode', '')
 
     results = []
-    if any([query, irb_number, pi_name, status]):
-        results = search_documents(
-            query=query,
-            irb_number=irb_number,
-            pi_name=pi_name,
-            status=status
-        )
+    similarity_scores = {}
+    if any([query, irb_number, pi_name, status]) or search_mode == 'ai':
+        if search_mode == 'ai':
+            print(f"[SEARCH] AI mode query='{query}' status='{status}'")
+            from services.searcher import semantic_search_documents
+            ai_results = semantic_search_documents(
+                query=query or '',
+                status=status or None,
+                top_k=Config.TOP_K_RETRIEVAL
+            )
+            results = [doc for doc, score in ai_results]
+            similarity_scores = {doc.id: score for doc, score in ai_results}
+        else:
+            print(f"[SEARCH] Traditional mode query='{query}' irb='{irb_number}' pi='{pi_name}' status='{status}'")
+            results = search_documents(
+                query=query,
+                irb_number=irb_number,
+                pi_name=pi_name,
+                status=status
+            )
 
     return render_template('search.html',
                            results=results,
                            query=query,
                            irb_number=irb_number,
                            pi_name=pi_name,
-                           status=status)
+                           status=status,
+                           search_mode='ai' if search_mode == 'ai' else 'traditional',
+                           similarity_scores=similarity_scores)
 
 
 @app.route('/document/<int:doc_id>')
 def document_detail(doc_id):
     """Document detail page with RAG query interface"""
     doc = Document.query.get_or_404(doc_id)
+
     return render_template('document.html', document=doc)
 
 
@@ -227,6 +227,7 @@ def query_document(doc_id):
     try:
         # Get query embedding
         query_embedding = embed_single(question)
+        print(f"[QA] Query embedding generated for doc {doc_id}")
 
         # Get document chunks
         chunks = doc.chunks.all()
@@ -235,6 +236,7 @@ def query_document(doc_id):
 
         # Get chunk embeddings
         chunk_embeddings = [chunk.get_embedding() for chunk in chunks]
+        print(f"[QA] Loaded {len(chunk_embeddings)} chunk embeddings for doc {doc_id}")
 
         # Find similar chunks
         top_k = data.get('top_k', Config.TOP_K_RETRIEVAL)
@@ -249,6 +251,7 @@ def query_document(doc_id):
                 'text': chunk.text,
                 'score': score
             })
+        print(f"[QA] Context blocks selected: {len(context_blocks)}")
 
         # Generate answer using GPT
         from openai import OpenAI
@@ -256,13 +259,9 @@ def query_document(doc_id):
 
         context = "\n\n".join([f"(Page {b['page']}) {b['text']}" for b in context_blocks])
 
-        model_name = Config.OPENAI_MODEL
-        model_lower = model_name.lower()
-        is_restricted_model = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
-
-        chat_params = {
-            "model": model_name,
-            "messages": [
+        response = client.chat.completions.create(
+            model=Config.OPENAI_MODEL,
+            messages=[
                 {
                     "role": "system",
                     "content": "You are an IRB protocol analysis assistant. Answer questions based only on the provided context. Cite page numbers in your answer."
@@ -271,14 +270,9 @@ def query_document(doc_id):
                     "role": "user",
                     "content": f"Question: {question}\n\nContext:\n{context}"
                 }
-            ]
-        }
-
-        if not is_restricted_model:
-            chat_params["max_tokens"] = 400
-            chat_params["temperature"] = 0.2
-
-        response = client.chat.completions.create(**chat_params)
+            ],
+            temperature=0.2
+        )
 
         answer = response.choices[0].message.content
 
@@ -350,12 +344,7 @@ def extract_field_endpoint(doc_id):
 
         # Update document if successful
         if result['status'] == 'success' and result['value']:
-            new_value = result['value']
-            if field_name == 'expiration_date':
-                new_value = parse_date(new_value)
-                if not new_value:
-                    return jsonify({'error': 'Extracted expiration_date could not be parsed'}), 400
-            setattr(doc, field_name, new_value)
+            setattr(doc, field_name, result['value'])
             db.session.commit()
 
         return jsonify(result)
@@ -393,24 +382,9 @@ def re_extract_metadata(doc_id):
         if not document_text:
             return jsonify({'error': 'No text available for this document'}), 400
 
-        # Prepare chunk data with stored embeddings
-        chunk_texts = []
-        chunk_embeddings = []
-        for chunk in chunks:
-            emb = chunk.get_embedding()
-            if emb is None:
-                continue
-            chunk_texts.append(chunk.text)
-            chunk_embeddings.append(emb)
-
         # Re-extract metadata with page tracking
         print(f"[RE-EXTRACTION] Starting for document {doc_id}")
-        metadata = extract_metadata(
-            document_text,
-            pages_text=pages,
-            chunk_texts=chunk_texts if chunk_texts else None,
-            chunk_embeddings=chunk_embeddings if chunk_embeddings else None
-        )
+        metadata = extract_metadata(document_text, pages_text=pages)
 
         summary = metadata.pop('_extraction_summary', {})
         page_refs = metadata.pop('_page_references', {})
@@ -419,8 +393,6 @@ def re_extract_metadata(doc_id):
         # Update document fields
         for key, value in metadata.items():
             if hasattr(doc, key):
-                if key == 'expiration_date' and isinstance(value, str):
-                    value = parse_date(value)
                 setattr(doc, key, value)
 
         # Update page references
@@ -489,12 +461,6 @@ def update_metadata(doc_id):
                     value = None
                 elif isinstance(value, str):
                     value = value.strip() or None
-
-                if field == 'expiration_date' and value:
-                    parsed_date = parse_date(value)
-                    if not parsed_date:
-                        return jsonify({'error': 'Invalid expiration_date format. Use YYYY-MM-DD or a recognizable date.'}), 400
-                    value = parsed_date
 
                 setattr(doc, field, value)
                 updated_fields.append(field)

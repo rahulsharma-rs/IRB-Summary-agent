@@ -42,6 +42,9 @@ class Document(db.Model):
     extraction_status = db.Column(db.String(50), default='pending')  # pending, success, partial, failed
     extraction_error = db.Column(db.Text)
 
+    # Document-level embedding for semantic search
+    document_embedding = db.Column(db.Text)
+
     # Track if manually edited
     manually_edited = db.Column(db.Boolean, default=False)
     last_edited_date = db.Column(db.DateTime)
@@ -92,6 +95,22 @@ class Document(db.Model):
             'extraction_status': self.extraction_status
         }
 
+    def set_document_embedding(self, embedding_array):
+        """Store document-level embedding as comma-separated string"""
+        if embedding_array is None:
+            self.document_embedding = None
+            return
+        self.document_embedding = ','.join(str(x) for x in embedding_array)
+
+    def get_document_embedding(self):
+        """Return document-level embedding as list of floats"""
+        if not self.document_embedding:
+            return None
+        try:
+            return [float(x) for x in self.document_embedding.split(',')]
+        except Exception:
+            return None
+
 
 class DocumentChunk(db.Model):
     __tablename__ = 'document_chunks'
@@ -127,8 +146,18 @@ def init_db(app):
     with app.app_context():
         try:
             inspector = inspect(db.engine)
-            if not inspector.has_table('documents') or not inspector.has_table('document_chunks'):
+            existing_tables = inspector.get_table_names()
+
+            # Create tables if missing
+            if 'documents' not in existing_tables or 'document_chunks' not in existing_tables:
                 db.create_all()
+
+            # Ensure document_embedding column exists (SQLite safe)
+            if 'documents' in existing_tables:
+                columns = [col['name'] for col in inspector.get_columns('documents')]
+                if 'document_embedding' not in columns:
+                    with db.engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE documents ADD COLUMN document_embedding TEXT"))
         except Exception as exc:
             # If tables already exist or another process created them, continue
             app.logger.warning(f"Database init skipped/failed: {exc}")

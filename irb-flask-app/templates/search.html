@@ -9,17 +9,37 @@
 </div>
 
 <div class="search-section">
-    <form method="GET" action="{{ url_for('search') }}" class="search-form">
+    <form method="GET" action="{{ url_for('search') }}" class="search-form" id="search-form">
+        <!-- Search Mode Toggle -->
+        <div class="search-mode-toggle">
+            <label class="toggle-label">
+                <input type="checkbox" name="mode" value="ai" id="mode-toggle"
+                       {% if search_mode == 'ai' %}checked{% endif %}>
+                <span class="toggle-slider"></span>
+                <span class="toggle-text">
+                    <span class="mode-traditional">🔍 Traditional Search</span>
+                    <span class="mode-ai">🤖 AI Semantic Search</span>
+                </span>
+            </label>
+            <p class="mode-description">
+                <span class="desc-traditional">Search by exact keywords in title, PI, IRB number</span>
+                <span class="desc-ai">Search using natural language - understands meaning and context</span>
+            </p>
+        </div>
+
         <div class="search-row">
             <input type="text"
                    name="q"
+                   id="search-query"
                    placeholder="Search title, purpose, PI..."
                    value="{{ query }}"
                    class="search-input">
-            <button type="submit" class="btn btn-primary">🔍 Search</button>
+            <button type="submit" class="btn btn-primary">
+                <span id="search-icon">🔍</span> Search
+            </button>
         </div>
 
-        <div class="filters-row">
+        <div class="filters-row" id="advanced-filters">
             <input type="text"
                    name="irb"
                    placeholder="IRB Number"
@@ -46,7 +66,12 @@
 
 <div class="results-section">
     {% if results %}
-        <p class="results-count">Found <strong>{{ results|length }}</strong> documents</p>
+        <p class="results-count">
+            Found <strong>{{ results|length }}</strong> documents
+            {% if search_mode == 'ai' %}
+            <span class="ai-badge">🤖 AI Search</span>
+            {% endif %}
+        </p>
 
         <div class="results-list">
             {% for doc in results %}
@@ -57,9 +82,16 @@
                             {{ doc.study_title or 'Untitled Study' }}
                         </a>
                     </h3>
-                    <span class="status-badge status-{{ doc.protocol_status or 'unknown' }}">
-                        {{ doc.protocol_status or 'Unknown' }}
-                    </span>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <span class="status-badge status-{{ doc.protocol_status or 'unknown' }}">
+                            {{ doc.protocol_status or 'Unknown' }}
+                        </span>
+                        {% if search_mode == 'ai' and doc.id in similarity_scores %}
+                        <span class="similarity-badge" title="AI Similarity Score">
+                            {{ "%.0f"|format(similarity_scores[doc.id] * 100) }}% match
+                        </span>
+                        {% endif %}
+                    </div>
                 </div>
 
                 <div class="result-meta">
@@ -94,12 +126,69 @@
     {% elif query or irb_number or pi_name or status %}
         <div class="no-results">
             <p>No documents found matching your search criteria.</p>
+            {% if search_mode == 'ai' %}
+            <p class="hint">Try rephrasing your query or switch to Traditional Search.</p>
+            {% else %}
             <p class="hint">Try different keywords or remove some filters.</p>
+            {% endif %}
         </div>
     {% else %}
         <div class="no-results">
             <p>Enter search terms above to find documents.</p>
+            {% if search_mode == 'ai' %}
+            <p class="hint">💡 <strong>AI Search Examples:</strong><br>
+            "cancer studies funded by NIH"<br>
+            "diabetes research with pediatric patients"<br>
+            "exempt studies about covid vaccines"</p>
+            {% endif %}
         </div>
     {% endif %}
 </div>
+
+{% block page_scripts %}
+<script>
+// Handle search mode toggle
+const modeToggle = document.getElementById('mode-toggle');
+const searchIcon = document.getElementById('search-icon');
+const searchQuery = document.getElementById('search-query');
+const advancedFilters = document.getElementById('advanced-filters');
+
+function updateSearchMode() {
+    const isAI = modeToggle.checked;
+
+    // Update icon
+    searchIcon.textContent = isAI ? '🤖' : '🔍';
+
+    // Update placeholder
+    if (isAI) {
+        searchQuery.placeholder = 'Describe what you\'re looking for in natural language...';
+        // Hide IRB/PI filters in AI mode (they can still use status filter)
+        advancedFilters.style.opacity = '0.6';
+        advancedFilters.querySelectorAll('input[type="text"]').forEach(input => {
+            input.disabled = true;
+        });
+    } else {
+        searchQuery.placeholder = 'Search title, purpose, PI...';
+        advancedFilters.style.opacity = '1';
+        advancedFilters.querySelectorAll('input[type="text"]').forEach(input => {
+            input.disabled = false;
+        });
+    }
+
+    // Update visible mode text
+    document.querySelectorAll('.mode-traditional, .desc-traditional').forEach(el => {
+        el.style.display = isAI ? 'none' : 'inline';
+    });
+    document.querySelectorAll('.mode-ai, .desc-ai').forEach(el => {
+        el.style.display = isAI ? 'inline' : 'none';
+    });
+}
+
+if (modeToggle) {
+    modeToggle.addEventListener('change', updateSearchMode);
+    // Initialize on page load
+    updateSearchMode();
+}
+</script>
+{% endblock %}
 {% endblock %}

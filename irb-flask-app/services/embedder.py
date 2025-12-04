@@ -91,4 +91,9 @@ def find_similar_chunks(query_embedding: np.ndarray,
 
     results = [(int(idx), float(similarities[idx])) for idx in top_indices]
 
+    # Debug logging
+    print(f"[CHUNK_SEARCH] chunks={len(chunk_embeddings)} top_k={top_k}")
+    for rank, (idx, score) in enumerate(results, 1):
+        print(f"[CHUNK_SEARCH] #{rank} idx={idx} score={score:.3f}")
+
     return results
