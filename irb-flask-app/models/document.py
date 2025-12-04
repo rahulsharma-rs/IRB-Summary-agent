@@ -73,7 +73,8 @@ def vision_transcribe_page(doc: fitz.Document, page_index: int, model: str) -> s
 
     try:
         page = doc[page_index]
-        pix = page.get_pixmap(dpi=220)
+        # Lower DPI to speed up processing
+        pix = page.get_pixmap(dpi=170)
         image_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         params = {
             "model": model or Config.OPENAI_VISION_MODEL,
@@ -91,7 +92,8 @@ def vision_transcribe_page(doc: fitz.Document, page_index: int, model: str) -> s
                 }
             ]
         }
-        resp = client.chat.completions.create(**params)
+        # Add timeout to avoid hanging
+        resp = client.chat.completions.create(timeout=Config.OPENAI_VISION_TIMEOUT, **params)
         return resp.choices[0].message.content.strip()
     except Exception:
         return ""

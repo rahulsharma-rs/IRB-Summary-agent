@@ -21,6 +21,7 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-5-nano')
     OPENAI_VISION_MODEL = os.getenv('OPENAI_VISION_MODEL', os.getenv('OPENAI_MODEL', 'gpt-4o-mini'))
+    OPENAI_VISION_TIMEOUT = int(os.getenv('OPENAI_VISION_TIMEOUT', '30'))  # seconds
     EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-large')
 
     # Upload settings
