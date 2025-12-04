@@ -1,6 +1,7 @@
 import os
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
 from datetime import datetime
 
 from config import Config
@@ -19,6 +20,8 @@ Config.init_app(app)
 # Initialize database
 init_db(app)
 
+# Handle proxy headers for /irb prefix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 def allowed_file(filename):
     return '.' in filename and \
