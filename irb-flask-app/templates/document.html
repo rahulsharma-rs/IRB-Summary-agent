@@ -1,5 +1,24 @@
 {% extends "base.html" %}
 
+{% macro render_pages(pages_str) -%}
+    {%- if pages_str %}
+        {%- set pages = pages_str.split(',') %}
+        <div class="page-ref-list" data-pages="{{ pages_str }}">
+            {%- for p in pages[:10] %}
+                <span class="page-ref-chip">📄 {{ p|trim }}</span>
+            {%- endfor %}
+            {%- if pages|length > 10 %}
+                <button type="button"
+                        class="page-ref-more"
+                        data-pages="{{ pages_str }}"
+                        onclick="showAllPages(this)">
+                    +{{ pages|length - 10 }} more
+                </button>
+            {%- endif %}
+        </div>
+    {%- endif %}
+{%- endmacro %}
+
 {% block title %}{{ document.study_title or document.filename }} - IRB Explorer{% endblock %}
 
 {% block content %}
@@ -43,9 +62,7 @@
                 <label>IRB Number</label>
                 <value class="view-mode">
                     {{ document.irb_number or 'Not specified' }}
-                    {% if document.irb_number_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.irb_number_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.irb_number_pages) }}
                 </value>
                 <input type="text" class="edit-mode metadata-input" data-field="irb_number"
                        value="{{ document.irb_number or '' }}" style="display: none;">
@@ -55,9 +72,7 @@
                 <label>Principal Investigator</label>
                 <value class="view-mode">
                     {{ document.principal_investigator or 'Not specified' }}
-                    {% if document.principal_investigator_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.principal_investigator_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.principal_investigator_pages) }}
                 </value>
                 <input type="text" class="edit-mode metadata-input" data-field="principal_investigator"
                        value="{{ document.principal_investigator or '' }}" style="display: none;">
@@ -67,9 +82,7 @@
                 <label>Protocol Status</label>
                 <value class="view-mode">
                     {{ document.protocol_status or 'Not specified' }}
-                    {% if document.protocol_status_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.protocol_status_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.protocol_status_pages) }}
                 </value>
                 <select class="edit-mode metadata-input" data-field="protocol_status" style="display: none;">
                     <option value="">Not specified</option>
@@ -85,9 +98,7 @@
                 <label>Expiration Date</label>
                 <value class="view-mode">
                     {{ document.expiration_date or 'Not specified' }}
-                    {% if document.expiration_date_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.expiration_date_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.expiration_date_pages) }}
                 </value>
                 <input type="date" class="edit-mode metadata-input" data-field="expiration_date"
                        value="{{ document.expiration_date or '' }}" style="display: none;">
@@ -97,9 +108,7 @@
                 <label>Study Title</label>
                 <value class="view-mode">
                     {{ document.study_title or 'Not specified' }}
-                    {% if document.study_title_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.study_title_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.study_title_pages) }}
                 </value>
                 <input type="text" class="edit-mode metadata-input" data-field="study_title"
                        value="{{ document.study_title or '' }}" style="display: none;">
@@ -109,9 +118,7 @@
                 <label>Study Purpose</label>
                 <value class="view-mode">
                     {{ document.study_purpose or 'Not specified' }}
-                    {% if document.study_purpose_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.study_purpose_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.study_purpose_pages) }}
                 </value>
                 <textarea class="edit-mode metadata-input" data-field="study_purpose"
                           rows="3" style="display: none;">{{ document.study_purpose or '' }}</textarea>
@@ -121,9 +128,7 @@
                 <label>Inclusion Criteria</label>
                 <value class="view-mode">
                     {{ document.inclusion_criteria or 'Not specified' }}
-                    {% if document.inclusion_criteria_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.inclusion_criteria_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.inclusion_criteria_pages) }}
                 </value>
                 <textarea class="edit-mode metadata-input" data-field="inclusion_criteria"
                           rows="4" style="display: none;">{{ document.inclusion_criteria or '' }}</textarea>
@@ -133,9 +138,7 @@
                 <label>Exclusion Criteria</label>
                 <value class="view-mode">
                     {{ document.exclusion_criteria or 'Not specified' }}
-                    {% if document.exclusion_criteria_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.exclusion_criteria_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.exclusion_criteria_pages) }}
                 </value>
                 <textarea class="edit-mode metadata-input" data-field="exclusion_criteria"
                           rows="4" style="display: none;">{{ document.exclusion_criteria or '' }}</textarea>
@@ -145,9 +148,7 @@
                 <label>Approved Data Elements</label>
                 <value class="view-mode">
                     {{ document.data_elements or 'Not specified' }}
-                    {% if document.data_elements_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.data_elements_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.data_elements_pages) }}
                 </value>
                 <textarea class="edit-mode metadata-input" data-field="data_elements"
                           rows="3" style="display: none;">{{ document.data_elements or '' }}</textarea>
@@ -157,9 +158,7 @@
                 <label>Funding Source</label>
                 <value class="view-mode">
                     {{ document.funding_source or 'Not specified' }}
-                    {% if document.funding_source_pages %}
-                    <span class="page-ref">📄 Pages: {{ document.funding_source_pages }}</span>
-                    {% endif %}
+                    {{ render_pages(document.funding_source_pages) }}
                 </value>
                 <input type="text" class="edit-mode metadata-input" data-field="funding_source"
                        value="{{ document.funding_source or '' }}" style="display: none;">
@@ -394,6 +393,13 @@ function showStatus(message, type) {
     statusDiv.textContent = message;
     statusDiv.className = 'status-message ' + type;
     statusDiv.style.display = 'block';
+}
+
+function showAllPages(btn) {
+    const pages = btn.dataset.pages || '';
+    if (!pages) return;
+    const formatted = pages.split(',').map(p => p.trim()).filter(Boolean).join(', ');
+    alert('Pages: ' + formatted);
 }
 </script>
 {% endblock %}
