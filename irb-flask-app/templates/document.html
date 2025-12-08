@@ -24,11 +24,9 @@
         {% if document.manually_edited %}
         <span class="edited-badge">✏️ Manually Edited</span>
         {% endif %}
-        {% if document.extraction_status in ['failed', 'partial'] %}
         <button id="re-extract-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
             🔄 Re-extract Metadata
         </button>
-        {% endif %}
         <button id="edit-mode-btn" class="btn btn-secondary" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
             ✏️ Edit Metadata
         </button>
