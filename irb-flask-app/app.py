@@ -182,7 +182,8 @@ def search():
             ai_results = semantic_search_documents(
                 query=query or '',
                 status=status or None,
-                top_k=Config.TOP_K_RETRIEVAL
+                top_k=Config.TOP_K_RETRIEVAL,
+                similarity_threshold=0.0
             )
             results = [doc for doc, score in ai_results]
             similarity_scores = {doc.id: score for doc, score in ai_results}

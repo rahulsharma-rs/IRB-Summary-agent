@@ -53,7 +53,7 @@ def semantic_search_documents(query: str,
                               date_from: str = None,
                               date_to: str = None,
                               top_k: int = 50,
-                              similarity_threshold: float = 0.3) -> list:
+                              similarity_threshold: float = 0.0) -> list:
     """
     Semantic search using document-level embeddings.
 
@@ -129,6 +129,11 @@ def semantic_search_documents(query: str,
 
         if similarity >= similarity_threshold:
             results.append((doc, similarity))
+        else:
+            # Still keep, just at low score if threshold is 0
+            if similarity_threshold <= 0:
+                results.append((doc, similarity))
+        if similarity >= similarity_threshold:
             print(f"[SEMANTIC_SEARCH] Doc {doc.id} similarity {similarity:.3f}")
 
     # Sort by similarity (highest first)
